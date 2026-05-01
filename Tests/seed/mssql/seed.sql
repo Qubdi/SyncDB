@@ -4,7 +4,22 @@ BEGIN
 END
 GO
 
+IF NOT EXISTS (SELECT 1 FROM sys.sql_logins WHERE name = N'admin')
+BEGIN
+    CREATE LOGIN admin WITH PASSWORD = N'admin', CHECK_POLICY = OFF, CHECK_EXPIRATION = OFF;
+END
+GO
+
 USE syncdb_test;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'admin')
+BEGIN
+    CREATE USER admin FOR LOGIN admin;
+END
+GO
+
+ALTER ROLE db_owner ADD MEMBER admin;
 GO
 
 IF OBJECT_ID(N'dbo.payments', N'U') IS NOT NULL DROP TABLE dbo.payments;

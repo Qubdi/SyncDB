@@ -22,13 +22,22 @@ docker compose up -d --build
 
 Custom local images:
 
-- `qubdi-syncdb-mssql:latest`
-- `qubdi-syncdb-mssql-tools:latest`
-- `qubdi-syncdb-postgres:latest`
-- `qubdi-syncdb-mysql:latest`
-- `qubdi-syncdb-pgadmin:latest`
-- `qubdi-syncdb-phpmyadmin:latest`
-- `qubdi-syncdb-cloudbeaver:latest`
+- `qubdi-syncdb-mssql:2022-CU23-ubuntu-22.04`
+- `qubdi-syncdb-mssql-tools:2022-CU23-ubuntu-22.04`
+- `qubdi-syncdb-postgres:18.3`
+- `qubdi-syncdb-mysql:9.7.0`
+- `qubdi-syncdb-pgadmin:9.14.0`
+- `qubdi-syncdb-phpmyadmin:5.2.3`
+- `qubdi-syncdb-cloudbeaver:26.0.3`
+
+Pinned upstream base images:
+
+- `mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04`
+- `postgres:18.3`
+- `mysql:9.7.0`
+- `dpage/pgadmin4:9.14.0`
+- `phpmyadmin:5.2.3`
+- `dbeaver/cloudbeaver:26.0.3`
 
 Container names:
 
@@ -57,8 +66,8 @@ http://localhost:18080
 pgAdmin login:
 
 ```text
-Email: admin@qubdi.local
-Password: syncdb
+Email: admin@admin.com
+Password: admin
 ```
 
 PostgreSQL connection inside pgAdmin:
@@ -67,8 +76,8 @@ PostgreSQL connection inside pgAdmin:
 Host: postgres
 Port: 5432
 Database: syncdb_test
-User: syncdb
-Password: syncdb
+User: admin
+Password: admin
 ```
 
 ### MySQL IDE
@@ -86,15 +95,15 @@ phpMyAdmin is preconfigured to use the MySQL container.
 Login:
 
 ```text
-User: syncdb
-Password: syncdb
+User: admin
+Password: admin
 ```
 
 Root login is also available for admin testing:
 
 ```text
 User: root
-Password: root
+Password: admin
 ```
 
 ### MSSQL IDE
@@ -113,8 +122,8 @@ On first open, CloudBeaver asks for initial workspace/admin setup. After setup, 
 Host: mssql
 Port: 1433
 Database: syncdb_test
-User: sa
-Password: SyncDB_Strong_Passw0rd!
+User: admin
+Password: admin
 ```
 
 CloudBeaver can also be used as a universal IDE for PostgreSQL and MySQL if needed. Use `postgres:5432` and `mysql:3306` as Docker-network hosts.
@@ -126,15 +135,15 @@ CloudBeaver can also be used as a universal IDE for PostgreSQL and MySQL if need
 ```text
 Host: localhost
 Port: 11433
-User: sa
-Password: SyncDB_Strong_Passw0rd!
+User: admin
+Password: admin
 Database: syncdb_test
 ```
 
 ODBC connection string example:
 
 ```text
-Driver={ODBC Driver 17 for SQL Server};Server=localhost,11433;Database=syncdb_test;UID=sa;PWD=SyncDB_Strong_Passw0rd!;TrustServerCertificate=yes;
+Driver={ODBC Driver 17 for SQL Server};Server=localhost,11433;Database=syncdb_test;UID=admin;PWD=admin;TrustServerCertificate=yes;
 ```
 
 ### PostgreSQL
@@ -142,15 +151,15 @@ Driver={ODBC Driver 17 for SQL Server};Server=localhost,11433;Database=syncdb_te
 ```text
 Host: localhost
 Port: 15432
-User: syncdb
-Password: syncdb
+User: admin
+Password: admin
 Database: syncdb_test
 ```
 
 Connection string:
 
 ```text
-postgresql://syncdb:syncdb@localhost:15432/syncdb_test
+postgresql://admin:admin@localhost:15432/syncdb_test
 ```
 
 ### MySQL
@@ -158,15 +167,15 @@ postgresql://syncdb:syncdb@localhost:15432/syncdb_test
 ```text
 Host: localhost
 Port: 13306
-User: syncdb
-Password: syncdb
+User: admin
+Password: admin
 Database: syncdb_test
 ```
 
 Connection string:
 
 ```text
-mysql://syncdb:syncdb@localhost:13306/syncdb_test
+mysql://admin:admin@localhost:13306/syncdb_test
 ```
 
 ## Seeded Tables

@@ -2,11 +2,11 @@ services:
   mssql:
     build:
       context: ./images/mssql
-    image: qubdi-syncdb-mssql:latest
+    image: qubdi-syncdb-mssql:2022-CU23-ubuntu-22.04
     container_name: Qubdi-SyncDB-mssql
     environment:
       ACCEPT_EULA: "Y"
-      SA_PASSWORD: "SyncDB_Strong_Passw0rd!"
+      MSSQL_SA_PASSWORD: "Admin123!"
       MSSQL_PID: "Developer"
     ports:
       - "11433:1433"
@@ -16,12 +16,12 @@ services:
   mssql-init:
     build:
       context: ./images/mssql-tools
-    image: qubdi-syncdb-mssql-tools:latest
+    image: qubdi-syncdb-mssql-tools:2022-CU23-ubuntu-22.04
     container_name: Qubdi-SyncDB-mssql-init
     depends_on:
       - mssql
     environment:
-      SA_PASSWORD: "SyncDB_Strong_Passw0rd!"
+      MSSQL_SA_PASSWORD: "Admin123!"
     volumes:
       - ./seed/mssql:/seed:ro
     command: bash /seed/init.sh
@@ -30,11 +30,11 @@ services:
   postgres:
     build:
       context: ./images/postgres
-    image: qubdi-syncdb-postgres:latest
+    image: qubdi-syncdb-postgres:18.3
     container_name: Qubdi-SyncDB-postgres
     environment:
-      POSTGRES_USER: "syncdb"
-      POSTGRES_PASSWORD: "syncdb"
+      POSTGRES_USER: "admin"
+      POSTGRES_PASSWORD: "admin"
       POSTGRES_DB: "syncdb_test"
     ports:
       - "15432:5432"
@@ -42,7 +42,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./seed/postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U syncdb -d syncdb_test"]
+      test: ["CMD-SHELL", "pg_isready -U admin -d syncdb_test"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -50,20 +50,20 @@ services:
   mysql:
     build:
       context: ./images/mysql
-    image: qubdi-syncdb-mysql:latest
+    image: qubdi-syncdb-mysql:9.7.0
     container_name: Qubdi-SyncDB-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: "root"
+      MYSQL_ROOT_PASSWORD: "admin"
       MYSQL_DATABASE: "syncdb_test"
-      MYSQL_USER: "syncdb"
-      MYSQL_PASSWORD: "syncdb"
+      MYSQL_USER: "admin"
+      MYSQL_PASSWORD: "admin"
     ports:
       - "13306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./seed/mysql:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-padmin"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -71,13 +71,13 @@ services:
   postgres-ide:
     build:
       context: ./images/pgadmin
-    image: qubdi-syncdb-pgadmin:latest
+    image: qubdi-syncdb-pgadmin:9.14.0
     container_name: Qubdi-SyncDB-postgres-ide
     depends_on:
       - postgres
     environment:
-      PGADMIN_DEFAULT_EMAIL: "admin@qubdi.local"
-      PGADMIN_DEFAULT_PASSWORD: "syncdb"
+      PGADMIN_DEFAULT_EMAIL: "admin@admin.com"
+      PGADMIN_DEFAULT_PASSWORD: "admin"
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     ports:
@@ -88,15 +88,15 @@ services:
   mysql-ide:
     build:
       context: ./images/phpmyadmin
-    image: qubdi-syncdb-phpmyadmin:latest
+    image: qubdi-syncdb-phpmyadmin:5.2.3
     container_name: Qubdi-SyncDB-mysql-ide
     depends_on:
       - mysql
     environment:
       PMA_HOST: "mysql"
       PMA_PORT: "3306"
-      PMA_USER: "syncdb"
-      PMA_PASSWORD: "syncdb"
+      PMA_USER: "admin"
+      PMA_PASSWORD: "admin"
       UPLOAD_LIMIT: "512M"
     ports:
       - "18081:80"
@@ -104,7 +104,7 @@ services:
   mssql-ide:
     build:
       context: ./images/cloudbeaver
-    image: qubdi-syncdb-cloudbeaver:latest
+    image: qubdi-syncdb-cloudbeaver:26.0.3
     container_name: Qubdi-SyncDB-mssql-ide
     depends_on:
       - mssql
