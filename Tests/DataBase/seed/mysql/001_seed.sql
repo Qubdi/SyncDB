@@ -1,3 +1,5 @@
+-- ── Schema ────────────────────────────────────────────────────────────────────
+-- Drop in reverse FK dependency order so re-runs are safe.
 DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
@@ -81,6 +83,10 @@ CREATE TABLE datatype_samples (
     nullable_text VARCHAR(100) NULL
 );
 
+-- ── Seed Data ─────────────────────────────────────────────────────────────────
+-- MySQL lacks generate_series, so we build a temporary number sequence by
+-- cross-joining ten single-digit UNIONs (10^6 = 1,000,000 rows).
+-- Each table's INSERT filters this sequence with WHERE id <= N.
 CREATE TEMPORARY TABLE seq_1000000 (id INT PRIMARY KEY);
 
 INSERT INTO seq_1000000 (id)
@@ -250,6 +256,7 @@ SELECT
 FROM seq_1000000
 WHERE id <= 25;
 
+-- ── Indexes ───────────────────────────────────────────────────────────────────
 CREATE INDEX ix_orders_customer_id ON orders(customer_id);
 CREATE INDEX ix_orders_product_id ON orders(product_id);
 CREATE INDEX ix_orders_order_ts ON orders(order_ts);

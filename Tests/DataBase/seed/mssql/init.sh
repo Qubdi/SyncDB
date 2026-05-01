@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -e
 
+# mssql-tools18 uses -C (trust server certificate) and lives in a different
+# path than the legacy mssql-tools. Prefer tools18 when available.
 if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then
   SQLCMD="/opt/mssql-tools18/bin/sqlcmd -C"
 else
   SQLCMD="/opt/mssql-tools/bin/sqlcmd"
 fi
 
+# Accept both naming conventions used by different MSSQL Docker images.
 SQL_PASSWORD="${MSSQL_SA_PASSWORD:-$SA_PASSWORD}"
 
 echo "Waiting for SQL Server..."

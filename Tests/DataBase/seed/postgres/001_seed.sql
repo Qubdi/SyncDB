@@ -1,3 +1,5 @@
+-- ── Schema ────────────────────────────────────────────────────────────────────
+-- Drop in reverse FK dependency order so re-runs are safe.
 DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
@@ -84,6 +86,7 @@ CREATE TABLE datatype_samples (
     nullable_text text NULL
 );
 
+-- ── Seed Data ─────────────────────────────────────────────────────────────────
 INSERT INTO customers (customer_id, full_name, email, country, signup_ts, credit_score, is_active)
 SELECT
     id,
@@ -232,6 +235,7 @@ SELECT
     CASE WHEN id % 5 = 0 THEN NULL ELSE 'nullable sample ' || id END
 FROM generate_series(1, 25) AS id;
 
+-- ── Indexes ───────────────────────────────────────────────────────────────────
 CREATE INDEX ix_orders_customer_id ON orders(customer_id);
 CREATE INDEX ix_orders_product_id ON orders(product_id);
 CREATE INDEX ix_orders_order_ts ON orders(order_ts);

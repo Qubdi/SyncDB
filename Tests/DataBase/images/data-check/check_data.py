@@ -2,7 +2,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import mysql.connector
 import psycopg
@@ -19,7 +19,13 @@ EXPECTED_COUNTS = {
 }
 
 LINE = "-" * 76
-USE_COLOR = os.environ.get("NO_COLOR", "").lower() not in {"1", "true", "yes"}
+
+# Color is on when stdout is a TTY or FORCE_COLOR is set, unless NO_COLOR is set.
+# https://no-color.org — any non-empty value of NO_COLOR disables color.
+USE_COLOR = (
+    not os.environ.get("NO_COLOR")
+    and (sys.stdout.isatty() or bool(os.environ.get("FORCE_COLOR")))
+)
 
 
 class Color:
@@ -74,7 +80,7 @@ def print_count_header() -> None:
     print(color(f"{'-' * 20} {'-' * 12} {'-' * 12} {'-' * 10}", Color.DIM))
 
 
-def wait_for_connection(target: DatabaseTarget, attempts: int = 60, delay_seconds: int = 2):
+def wait_for_connection(target: DatabaseTarget, attempts: int = 60, delay_seconds: int = 2) -> Any:
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
@@ -95,7 +101,8 @@ def wait_for_connection(target: DatabaseTarget, attempts: int = 60, delay_second
     raise RuntimeError(f"{target.name}: connection failed after {attempts} attempts: {last_error}")
 
 
-def fetch_count(conn, target: DatabaseTarget, table: str) -> int:
+def fetch_count(conn: Any, target: DatabaseTarget, table: str) -> int:
+    # table comes from EXPECTED_COUNTS keys — never from user input.
     query = f"SELECT COUNT(*) FROM {target.table_name(table)}"
     with conn.cursor() as cur:
         cur.execute(query)
@@ -174,7 +181,7 @@ def main() -> int:
         ),
     ]
 
-    all_errors = []
+    all_errors: list[str] = []
     for target in targets:
         try:
             all_errors.extend(check_database(target))
@@ -194,5 +201,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

@@ -109,7 +109,8 @@ services:
     image: qubdi-syncdb-pgadmin:9.14.0
     container_name: Qubdi-SyncDB-postgres-ide
     depends_on:
-      - syncdb-postgres
+      syncdb-postgres:
+        condition: service_healthy
     environment:
       PGADMIN_DEFAULT_EMAIL: "admin@admin.com"
       PGADMIN_DEFAULT_PASSWORD: "admin"
@@ -130,7 +131,8 @@ services:
     image: qubdi-syncdb-phpmyadmin:5.2.3
     container_name: Qubdi-SyncDB-mysql-ide
     depends_on:
-      - syncdb-mysql
+      syncdb-mysql:
+        condition: service_healthy
     environment:
       PMA_HOST: "mysql"
       PMA_PORT: "3306"
