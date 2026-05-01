@@ -1,4 +1,9 @@
-"""Microsoft SQL Server connector."""
+"""Microsoft SQL Server connector.
+
+Uses pyodbc as the DB-API driver.  pyodbc is not a hard install-time dependency;
+the ImportError is raised lazily on the first connect() call so that users who only
+work with PostgreSQL or MySQL don't need the ODBC stack installed.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,9 @@ from ..type_mapping import Column
 
 class MSSQLConnector(BaseConnector):
     engine = "mssql"
+    # MSSQL uses [square brackets] for identifier quoting.
     quote_char = "["
+    # pyodbc uses "?" positional placeholders (ODBC standard).
     placeholder = "?"
 
     def connect(self) -> None:
@@ -25,6 +32,10 @@ class MSSQLConnector(BaseConnector):
         if self.config.connection_string:
             self.connection = pyodbc.connect(self.config.connection_string, timeout=self.config.connect_timeout)
         else:
+            # Build an ODBC connection string from individual config fields.
+            # TrustServerCertificate defaults to "yes" for ease of use in dev
+            # environments where the server uses a self-signed cert; override via
+            # config.options["TrustServerCertificate"] = "no" for production.
             connection_string = (
                 f"Driver={self.config.options.get('driver', '{ODBC Driver 17 for SQL Server}')};"
                 f"Server={self.config.host},{self.config.port};"
@@ -40,6 +51,8 @@ class MSSQLConnector(BaseConnector):
         cursor = self.connection.cursor()
         cursor.execute(query, tuple(params or []))
         if not cursor.description:
+            # DML statements (INSERT, DELETE, TRUNCATE, DDL) return no description;
+            # commit immediately so the change is visible to subsequent queries.
             self.connection.commit()
             return []
         columns = [col[0] for col in cursor.description]
@@ -82,6 +95,9 @@ class MSSQLConnector(BaseConnector):
         query = f"INSERT INTO {self.quote_table(schema, table)} ({column_sql}) VALUES ({placeholders})"
         values = [[row.get(column) for column in columns] for row in records]
         cursor = self.connection.cursor()
+        # fast_executemany sends all rows to the server in a single network round-trip
+        # using the TVP (table-valued parameter) protocol; typically 5-10x faster than
+        # the default row-by-row executemany for large batches.
         cursor.fast_executemany = True
         cursor.executemany(query, values)
         self.connection.commit()
@@ -139,8 +155,11 @@ class MSSQLConnector(BaseConnector):
         if not schema:
             return
         # validate_identifier is also called upstream by parse_qualified_name,
-        # but we enforce it here too since schema is embedded in a raw string.
+        # but we enforce it here because schema is embedded in a raw string literal
+        # inside the EXEC call, where parameterisation is not possible.
         validate_identifier(schema)
+        # CREATE SCHEMA must run in its own batch (no other statements on the same
+        # batch); EXEC() isolates it so it can follow other DDL in the same connection.
         self.execute_query(f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC(N'CREATE SCHEMA {schema}')")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
@@ -151,6 +170,7 @@ class MSSQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
+        # MSSQL uses "ALTER TABLE … ADD col type" (no "COLUMN" keyword).
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
@@ -160,5 +180,6 @@ class MSSQLConnector(BaseConnector):
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
 
     def _column_definition(self, column: Column) -> str:
+        """Build a single column definition fragment for CREATE TABLE / ALTER TABLE."""
         null_sql = " NULL" if column.nullable else " NOT NULL"
         return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"

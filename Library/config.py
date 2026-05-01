@@ -13,6 +13,8 @@ class Engine(str, Enum):
     MYSQL = "mysql"
 
 
+# Accepts common informal spellings so callers don't need to know the canonical value.
+# Keys are normalised to lowercase with hyphens replaced by underscores before lookup.
 _ENGINE_ALIASES = {
     "mssql": Engine.MSSQL,
     "sqlserver": Engine.MSSQL,
@@ -23,12 +25,16 @@ _ENGINE_ALIASES = {
     "mysql": Engine.MYSQL,
 }
 
+# Well-known default TCP ports; applied when the caller omits port entirely.
 _DEFAULT_PORTS = {
     Engine.MSSQL: 1433,
     Engine.POSTGRESQL: 5432,
     Engine.MYSQL: 3306,
 }
 
+# MySQL has no server-level schema namespace — databases ARE schemas there, so
+# there is no meaningful "default schema" to pre-fill (the database itself serves
+# that role and is already set in the database field).
 _DEFAULT_SCHEMAS = {
     Engine.MSSQL: "dbo",
     Engine.POSTGRESQL: "public",
@@ -40,6 +46,7 @@ def normalize_engine(engine: str | Engine) -> Engine:
     """Return a supported engine enum from a user-facing engine string."""
     if isinstance(engine, Engine):
         return engine
+    # strip/lower/replace so "SQL-Server", "SQL_SERVER", " Postgres " all resolve correctly.
     key = str(engine or "").strip().lower().replace("-", "_")
     try:
         return _ENGINE_ALIASES[key]
@@ -50,7 +57,15 @@ def normalize_engine(engine: str | Engine) -> Engine:
 
 @dataclass(frozen=True)
 class DatabaseConfig:
-    """Connection and behavior settings for one database endpoint."""
+    """Connection and behavior settings for one database endpoint.
+
+    Either supply a raw connection_string (passed through verbatim to the driver)
+    or supply host + database + user; everything else is optional and defaults to
+    sensible values for the chosen engine.
+
+    The dataclass is frozen so instances can be used as dict keys or in sets.
+    Mutating fields during __post_init__ therefore requires object.__setattr__.
+    """
 
     engine: str | Engine
     connection_string: str | None = None
@@ -67,8 +82,11 @@ class DatabaseConfig:
 
     def __post_init__(self) -> None:
         normalized = normalize_engine(self.engine)
+        # Store the canonical string value (e.g. "mssql") instead of the Engine
+        # enum so that equality checks and serialisation work on plain strings.
         object.__setattr__(self, "engine", normalized.value)
 
+        # Fill in engine-specific defaults that callers rarely want to override.
         if self.port is None:
             object.__setattr__(self, "port", _DEFAULT_PORTS[normalized])
         if self.default_schema is None:
@@ -79,6 +97,8 @@ class DatabaseConfig:
         if self.pool_min <= 0 or self.pool_max <= 0 or self.pool_min > self.pool_max:
             raise ValueError("pool_min and pool_max must be positive and pool_min <= pool_max")
 
+        # A raw connection_string is accepted as-is; individual credential fields
+        # are only required when no connection_string was provided.
         if self.connection_string:
             return
 
@@ -102,7 +122,12 @@ class DatabaseConfig:
         return normalize_engine(self.engine)
 
     def as_connection_kwargs(self) -> dict[str, Any]:
-        """Return DB-API-style connection keyword arguments."""
+        """Return DB-API-style connection keyword arguments.
+
+        None values are stripped so drivers that reject unexpected None kwargs
+        (e.g. psycopg2 for an absent password) don't raise spurious errors.
+        Caller-supplied options are merged last so they can override any default.
+        """
         kwargs: dict[str, Any] = {
             "host": self.host,
             "port": self.port,

@@ -1,4 +1,9 @@
-"""Database connector implementations."""
+"""Database connector implementations.
+
+Re-exports all connector classes so callers can import from the package root:
+  from syncdb.connectors import MSSQLConnector
+rather than reaching into individual submodules.
+"""
 
 from .base import BaseConnector
 from .mssql import MSSQLConnector

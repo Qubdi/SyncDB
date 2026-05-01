@@ -18,13 +18,24 @@ from .type_mapping import Column, SchemaMapper
 
 
 class TransferMode(str, Enum):
+    # Upsert-style: delete-then-insert for rows that match on primary key,
+    # append new rows.  Safe for incremental loads where source rows may be updated.
     APPEND = "append"
+    # Intended for a future implementation that bulk-loads into a staging table
+    # and then swaps atomically.  Currently behaves identically to APPEND because
+    # true staging requires connector-level support (temp table creation, swap DDL).
     APPEND_STAGING = "append_staging"
+    # Truncate the target before loading.  Suitable for full daily refreshes.
     FULL_REFRESH = "full_refresh"
 
 
 @dataclass
 class TableSyncResult:
+    """Runtime statistics and schema-change summary for one synced table.
+
+    Returned by SyncDB.sync_tables so callers can audit what happened without
+    parsing log output.  dry_run=True means no data or DDL was actually applied.
+    """
     name: str
     source: str
     destination: str
@@ -40,7 +51,18 @@ class TableSyncResult:
 
 
 class SyncDB:
-    """Main class-based API for database and local-file synchronization."""
+    """Main class-based API for database and local-file synchronization.
+
+    Typical usage patterns:
+      - Database → database:  supply both source and target; call sync_tables().
+      - Database → file:      supply source only; call export_query_to_file().
+      - File → database:      supply target only; call import_file_to_table().
+
+    source/target accept either a DatabaseConfig (connector is created internally)
+    or an already-constructed BaseConnector (useful for testing with a mock connector).
+    The source_connector/target_connector keyword arguments are legacy aliases kept
+    for backwards compatibility; prefer the positional source/target parameters.
+    """
 
     def __init__(
         self,
@@ -57,17 +79,29 @@ class SyncDB:
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than zero")
+        # source_connector/target_connector take precedence over source/target when both
+        # are supplied, allowing callers to inject test doubles without refactoring.
         self.source = source_connector or self._coerce_connector(source)
         self.target = target_connector or self._coerce_connector(target)
         self.batch_size = batch_size
         self.progress = ProgressReporter(progress_mode)
         self.dry_run = dry_run
+        # False by default: extra target columns are left untouched to avoid
+        # accidentally dropping manually-added audit or computed columns.
         self.drop_extra_columns = drop_extra_columns
         self.schema_mapper = schema_mapper or SchemaMapper()
         self.file_transfer = file_transfer or FileTransfer()
 
     def sync_tables(self, tables: dict[str, dict[str, Any]]) -> list[TableSyncResult]:
-        """Synchronize one or more database tables from source to target."""
+        """Synchronize one or more database tables from source to target.
+
+        tables is a dict keyed by a user-assigned logical name.  Each value is
+        a spec dict with at minimum "source" and "destination" table names, plus
+        optional "mode", "filter", "order_by", and "primary_key" keys.
+
+        Connections are opened once and reused across all tables; both are always
+        closed (even on error) via the finally block.
+        """
         if self.source is None or self.target is None:
             raise ValueError("source and target connectors/configs are required for database sync")
         results: list[TableSyncResult] = []
@@ -77,6 +111,7 @@ class SyncDB:
             for name, spec in tables.items():
                 results.append(self._sync_one_table(name, spec))
         finally:
+            # finish() emits the trailing newline for ONE_LINE progress mode.
             self.progress.finish()
             self.source.close()
             self.target.close()
@@ -89,7 +124,11 @@ class SyncDB:
         params: Sequence[Any] | None = None,
         file_format: str | None = None,
     ) -> int:
-        """Execute a source query and write its rows to a local file."""
+        """Execute a source query and write its rows to a local file.
+
+        Returns the number of rows written.  file_format overrides extension-based
+        detection when the output path's suffix is ambiguous or missing.
+        """
         if self.source is None:
             raise ValueError("source connector/config is required for export")
         self.source.connect()
@@ -106,7 +145,14 @@ class SyncDB:
         file_format: str | None = None,
         fresh_insert: bool = False,
     ) -> int:
-        """Read a local file and insert it into a target table."""
+        """Read a local file and insert it into a target table.
+
+        The target table is created automatically if it doesn't exist; column types
+        are inferred from the first row of the file via _infer_columns.
+        fresh_insert=True truncates an existing table before inserting.
+
+        Returns the number of rows inserted.
+        """
         if self.target is None:
             raise ValueError("target connector/config is required for import")
         rows = self.file_transfer.read(input_path, file_format)
@@ -139,6 +185,8 @@ class SyncDB:
             dry_run=self.dry_run,
         )
 
+        # Schema sync always runs (even in dry_run) so the result captures what
+        # would be created/altered; actual DDL is gated inside _sync_schema.
         source_columns = self.source.get_columns(source_name.schema, source_name.table)
         target_columns = self.schema_mapper.map_columns(source_columns, self.source.engine, self.target.engine)
         self._sync_schema(target_name.schema, target_name.table, target_columns, result)
@@ -153,6 +201,8 @@ class SyncDB:
         order_sql = build_order_by(spec.get("order_by"), self.source.quote_char)
         total = self._safe_source_count(source_name.schema, source_name.table, filter_sql, params)
         column_names = [column.name for column in source_columns]
+        # Prefer an explicit primary_key list from the spec; fall back to columns
+        # flagged is_primary_key by the source connector's metadata query.
         primary_key = list(spec.get("primary_key") or [column.name for column in source_columns if column.is_primary_key])
 
         # NOTE: append_staging is not yet distinguished from append at the
@@ -167,6 +217,9 @@ class SyncDB:
             order_by=order_sql,
             batch_size=self.batch_size,
         ):
+            # For APPEND modes: delete existing rows that match this batch on PK
+            # before re-inserting so updated source rows replace stale target rows.
+            # FULL_REFRESH skips this because the table was already truncated above.
             if mode in {TransferMode.APPEND, TransferMode.APPEND_STAGING} and primary_key:
                 self.target.delete_matching_rows(target_name.schema, target_name.table, batch, primary_key)
             written = self.target.insert_batch(target_name.schema, target_name.table, batch, column_names)
@@ -184,6 +237,15 @@ class SyncDB:
         columns: list[Column],
         result: TableSyncResult,
     ) -> None:
+        """Create or evolve the target table to match the mapped source columns.
+
+        Column matching is case-insensitive (both sides lowercased) so MSSQL's
+        case-insensitive collation and PostgreSQL's case-sensitive one don't cause
+        false mismatches when the only difference is letter case.
+
+        Columns are only added, never altered in type.  Drop only happens when
+        drop_extra_columns=True (off by default to protect manually-added columns).
+        """
         exists = self.target.table_exists(schema, table)
         if not exists:
             result.schema_created = bool(schema)
@@ -217,13 +279,23 @@ class SyncDB:
         params: Sequence[Any],
     ) -> int | None:
         # Row count is used only for progress display; swallowing errors here
-        # means a missing COUNT permission won't abort an otherwise valid sync.
+        # means a missing SELECT COUNT(*) permission won't abort an otherwise valid sync.
         try:
             return self.source.get_row_count(schema, table, where, params)
         except Exception:
             return None
 
     def _infer_columns(self, rows: list[dict[str, Any]]) -> list[Column]:
+        """Infer column types from the Python types in the first row of file data.
+
+        Uses PostgreSQL type names as the intermediate representation and then
+        maps them to the target engine via SchemaMapper.  This keeps the type
+        inference logic engine-agnostic.
+
+        Only four broad types are produced (boolean, bigint, double precision, text)
+        because file formats like CSV carry no type metadata; the target table can
+        always be pre-created manually for finer control.
+        """
         if not rows:
             raise ValueError("Cannot infer a target table from an empty file")
         sample = rows[0]
@@ -238,9 +310,11 @@ class SyncDB:
             else:
                 data_type = "text"
             columns.append(Column(name=name, data_type=data_type, nullable=True))
+        # bool check must come before int because bool is a subclass of int in Python.
         return self.schema_mapper.map_columns(columns, "postgresql", self.target.engine)
 
     def _coerce_connector(self, value: DatabaseConfig | BaseConnector | None) -> BaseConnector | None:
+        """Accept DatabaseConfig, a ready-made connector, or None."""
         if value is None:
             return None
         if isinstance(value, BaseConnector):

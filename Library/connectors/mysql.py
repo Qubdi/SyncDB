@@ -1,4 +1,17 @@
-"""MySQL connector."""
+"""MySQL connector.
+
+Supports two drivers transparently:
+  1. mysql-connector-python (official Oracle driver, preferred)
+  2. pymysql (pure-Python fallback, no C extension required)
+
+Driver selection is automatic: mysql.connector is tried first; if not installed,
+pymysql is tried next.  Both use the same %s placeholder style.
+
+The two drivers disagree on one keyword argument name:
+  mysql-connector-python  → connection_timeout
+  pymysql                 → connect_timeout
+The connect() method normalises this difference after driver selection.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +26,9 @@ from ..type_mapping import Column
 
 class MySQLConnector(BaseConnector):
     engine = "mysql"
+    # MySQL uses backtick quoting for identifiers.
     quote_char = "`"
+    # Both mysql-connector-python and pymysql use %s placeholders.
     placeholder = "%s"
 
     def connect(self) -> None:
@@ -26,10 +41,11 @@ class MySQLConnector(BaseConnector):
                 import pymysql
             except ImportError as exc:
                 raise ImportError("mysql-connector-python or pymysql is required for MySQL connections") from exc
-            # pymysql uses connect_timeout (matches our config key directly)
+            # pymysql uses connect_timeout (matches our config key directly).
             self.connection = pymysql.connect(**self._connection_kwargs())
             return
-        # mysql-connector-python uses connection_timeout, not connect_timeout
+        # mysql-connector-python uses connection_timeout, not connect_timeout;
+        # rename the key so the driver doesn't raise an unexpected keyword error.
         kwargs = self._connection_kwargs()
         if "connect_timeout" in kwargs:
             kwargs["connection_timeout"] = kwargs.pop("connect_timeout")
@@ -95,6 +111,7 @@ class MySQLConnector(BaseConnector):
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
             """,
+            # MySQL has no server-level schema namespace; database IS the schema.
             [schema or self.config.database, table],
         )
         primary_keys = set(self.get_primary_keys(schema, table))
@@ -107,6 +124,10 @@ class MySQLConnector(BaseConnector):
                 numeric_scale=row["numeric_scale"],
                 nullable=str(row["is_nullable"]).upper() == "YES",
                 is_primary_key=row["column_name"] in primary_keys,
+                # data_type only returns the base type (e.g. "int"); column_type
+                # returns the full definition (e.g. "int unsigned"), so we extract
+                # the UNSIGNED flag from column_type for correct range-widening in
+                # SchemaMapper._to_postgresql and _to_mssql.
                 unsigned="unsigned" in str(row.get("column_type", "")).lower(),
             )
             for row in rows
@@ -133,6 +154,7 @@ class MySQLConnector(BaseConnector):
 
     def create_schema(self, schema: str | None) -> None:
         if schema:
+            # In MySQL a "schema" is a database; CREATE DATABASE is the equivalent.
             self.execute_query(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(schema, self.quote_char)}")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
@@ -143,6 +165,7 @@ class MySQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
+        # MySQL requires the "COLUMN" keyword in ALTER TABLE … ADD COLUMN.
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
@@ -156,6 +179,11 @@ class MySQLConnector(BaseConnector):
         return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"
 
     def _connection_kwargs(self) -> dict[str, Any]:
+        """Build a kwargs dict from the config, parsing a URL connection string if needed.
+
+        Accepted URL schemes: mysql://, mysql+pymysql://, mysql+mysqlconnector://
+        URL percent-encoding is decoded from username and password fields.
+        """
         if not self.config.connection_string:
             return self.config.as_connection_kwargs()
         parsed = urlparse(self.config.connection_string)
@@ -170,4 +198,5 @@ class MySQLConnector(BaseConnector):
             "connect_timeout": self.config.connect_timeout,
         }
         kwargs.update(self.config.options)
+        # Strip None and empty-string values; drivers raise on unexpected None kwargs.
         return {key: value for key, value in kwargs.items() if value is not None and value != ""}

@@ -1,4 +1,10 @@
-"""Connector base classes."""
+"""Connector base classes.
+
+BaseConnector defines the interface that all engine-specific connectors must implement.
+The concrete subclasses (MSSQLConnector, PostgresConnector, MySQLConnector) override
+every @abstractmethod; two non-abstract helpers (get_row_count, delete_matching_rows)
+are provided here because their implementation is identical across all engines.
+"""
 
 from __future__ import annotations
 
@@ -12,26 +18,42 @@ from ..type_mapping import Column
 
 
 class BaseConnector(ABC):
-    """Contract implemented by supported database connectors."""
+    """Contract implemented by supported database connectors.
+
+    Each engine subclass sets three class-level attributes that drive SQL generation:
+      engine      — canonical engine string ("mssql", "postgresql", "mysql")
+      quote_char  — identifier quote character for that engine
+                    '"' (PostgreSQL/MySQL double-quote), '`' (MySQL backtick), '[' (MSSQL)
+      placeholder — parameterised query placeholder: '?' (pyodbc) or '%s' (psycopg2/pymysql)
+    """
 
     engine: str
+    # PostgreSQL and MySQL (double-quote mode) default; MSSQL overrides to "[".
     quote_char = '"'
+    # pyodbc uses "?"; psycopg2 and pymysql use "%s".  Subclasses override accordingly.
     placeholder = "?"
 
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
+        # Lazily set by connect(); None signals that no live connection exists yet.
         self.connection = None
 
     @abstractmethod
     def connect(self) -> None:
-        """Open an underlying DB connection."""
+        """Open an underlying DB connection.
+
+        Implementations must be idempotent — calling connect() when self.connection
+        is already set should be a no-op, not raise or open a second connection.
+        """
 
     def close(self) -> None:
+        """Close the underlying connection and reset self.connection to None."""
         if self.connection is not None:
             self.connection.close()
             self.connection = None
 
     def __enter__(self):
+        """Support the 'with connector:' context manager pattern."""
         self.connect()
         return self
 
@@ -39,11 +61,16 @@ class BaseConnector(ABC):
         self.close()
 
     def quote_table(self, schema: str | None, table: str) -> str:
+        """Return a fully-quoted, engine-appropriate table reference."""
         return quote_qualified(QualifiedName(schema, table), self.quote_char)
 
     @abstractmethod
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
-        """Execute a query and return rows as dictionaries."""
+        """Execute a query and return rows as dictionaries.
+
+        DML statements (INSERT, DELETE, TRUNCATE) return an empty list and
+        auto-commit; SELECT statements return a list of column-name → value dicts.
+        """
 
     @abstractmethod
     def fetch_batches(
@@ -56,7 +83,12 @@ class BaseConnector(ABC):
         order_by: str = "",
         batch_size: int = 5000,
     ) -> Iterator[list[dict[str, Any]]]:
-        """Yield table rows in batches."""
+        """Yield table rows in batches of up to batch_size rows each.
+
+        Uses cursor.fetchmany() under the hood so the full result set is never
+        loaded into memory at once.  The iterator is exhausted when the cursor
+        returns an empty batch.
+        """
 
     @abstractmethod
     def insert_batch(
@@ -66,41 +98,46 @@ class BaseConnector(ABC):
         rows: Iterable[dict[str, Any]],
         columns: Sequence[str],
     ) -> int:
-        """Insert rows and return the number inserted."""
+        """Insert rows and return the number of rows inserted."""
 
     @abstractmethod
     def get_columns(self, schema: str | None, table: str) -> list[Column]:
-        """Return source/target column metadata."""
+        """Return ordered column metadata from INFORMATION_SCHEMA."""
 
     @abstractmethod
     def get_primary_keys(self, schema: str | None, table: str) -> list[str]:
-        """Return primary-key column names."""
+        """Return primary-key column names in key ordinal order."""
 
     @abstractmethod
     def table_exists(self, schema: str | None, table: str) -> bool:
-        """Return whether a table exists."""
+        """Return True if the table exists in the given schema."""
 
     @abstractmethod
     def create_schema(self, schema: str | None) -> None:
-        """Create a schema/database namespace when the engine supports it."""
+        """Create a schema/database namespace if it does not already exist.
+
+        Implementations must be idempotent (IF NOT EXISTS / IF SCHEMA_ID IS NULL).
+        A None schema is silently ignored.
+        """
 
     @abstractmethod
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
-        """Create a table from mapped columns."""
+        """Create a table from a list of mapped Columns, including a PRIMARY KEY if any."""
 
     @abstractmethod
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        """Add a missing target column."""
+        """ALTER TABLE … ADD COLUMN for a missing target column."""
 
     @abstractmethod
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        """Drop an extra target column."""
+        """ALTER TABLE … DROP COLUMN for an extra target column."""
 
     @abstractmethod
     def truncate_table(self, schema: str | None, table: str) -> None:
-        """Remove all rows from a table."""
+        """Remove all rows from a table without logging individual deletes."""
 
     def get_row_count(self, schema: str | None, table: str, where: str = "", params: Sequence[Any] | None = None) -> int:
+        """Return SELECT COUNT(*) for the table, optionally filtered by a WHERE clause."""
         name = self.quote_table(schema, table)
         row = self.execute_query(f"SELECT COUNT(*) AS row_count FROM {name}{where}", params or [])[0]
         return int(row["row_count"])
@@ -114,9 +151,11 @@ class BaseConnector(ABC):
     ) -> int:
         """Delete target rows matching incoming primary-key values.
 
-        Builds a single DELETE ... WHERE (pk1=? AND pk2=?) OR (...) statement.
-        For large batch_size values this OR-list grows proportionally; consider
-        a smaller batch_size if DELETE latency becomes a bottleneck.
+        Builds a single DELETE … WHERE (pk1=? AND pk2=?) OR (…) statement.
+        One parameterised predicate is emitted per source row, so the parameter
+        list and OR-clause length both scale linearly with batch_size.  For very
+        large batches (> ~10 000 rows) this can hit driver parameter limits on
+        some engines; use a smaller batch_size if that becomes an issue.
         """
         if not rows or not primary_key:
             return 0

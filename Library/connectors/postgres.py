@@ -1,4 +1,9 @@
-"""PostgreSQL connector."""
+"""PostgreSQL connector.
+
+Uses psycopg2 as the DB-API driver.  psycopg2 is not a hard install-time dependency;
+the ImportError is raised lazily on the first connect() call so that users who only
+work with MSSQL or MySQL don't need libpq or the psycopg2 binary installed.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,9 @@ from ..type_mapping import Column
 
 class PostgresConnector(BaseConnector):
     engine = "postgresql"
+    # PostgreSQL uses standard double-quote identifier quoting.
     quote_char = '"'
+    # psycopg2 uses %s placeholders (same as pymysql / mysql-connector).
     placeholder = "%s"
 
     def connect(self) -> None:
@@ -23,9 +30,13 @@ class PostgresConnector(BaseConnector):
         except ImportError as exc:
             raise ImportError("psycopg2 is required for PostgreSQL connections") from exc
         if self.config.connection_string:
+            # psycopg2 accepts libpq connection strings or DSNs directly.
+            # connect_timeout is passed as a separate kwarg because some DSN
+            # forms don't include it and psycopg2 accepts it outside the DSN.
             self.connection = psycopg2.connect(self.config.connection_string, connect_timeout=self.config.connect_timeout)
         else:
             kwargs = self.config.as_connection_kwargs()
+            # psycopg2 uses "dbname", not "database" — rename before passing.
             kwargs["dbname"] = kwargs.pop("database")
             self.connection = psycopg2.connect(**kwargs)
 
@@ -34,6 +45,7 @@ class PostgresConnector(BaseConnector):
         cursor = self.connection.cursor()
         cursor.execute(query, tuple(params or []))
         if not cursor.description:
+            # DML/DDL without a result set; commit to make the change visible.
             self.connection.commit()
             return []
         columns = [col[0] for col in cursor.description]
@@ -129,6 +141,8 @@ class PostgresConnector(BaseConnector):
 
     def create_schema(self, schema: str | None) -> None:
         if schema:
+            # IF NOT EXISTS avoids an error when two parallel processes both try
+            # to create the same schema on the first run.
             self.execute_query(f"CREATE SCHEMA IF NOT EXISTS {quote_identifier(schema, self.quote_char)}")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:

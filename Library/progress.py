@@ -1,4 +1,11 @@
-"""Progress reporting for interactive terminals and log-like environments."""
+"""Progress reporting for interactive terminals and log-like environments.
+
+Three modes are supported:
+  ONE_LINE   — overwrites the same terminal line using a carriage return (\r).
+               Ideal for interactive terminals; ugly in CI logs.
+  MULTI_LINE — emits a new line per batch update.  Safe for log aggregators.
+  NONE       — silent; no output at all.
+"""
 
 from __future__ import annotations
 
@@ -22,14 +29,20 @@ class ProgressReporter:
     ) -> None:
         self.mode = ProgressMode(mode)
         self.width = width
+        # Allow callers to inject a custom stream for testing or log capture.
         self.stream = stream or sys.stdout
+        # Tracks whether a \r-terminated line is waiting for a terminal newline.
+        # finish() must emit \n before any other output to avoid corrupted lines.
         self._last_line_open = False
 
     def update(self, label: str, current: int, total: int | None = None) -> None:
+        """Emit a progress line.  Call once per batch with the running row count."""
         if self.mode == ProgressMode.NONE:
             return
         line = self._format_line(label, current, total)
         if self.mode == ProgressMode.ONE_LINE:
+            # \r moves the cursor to the start of the current line so the next
+            # write overwrites it rather than appending a new line.
             self.stream.write("\r" + line)
             self.stream.flush()
             self._last_line_open = True
@@ -38,14 +51,26 @@ class ProgressReporter:
         self.stream.flush()
 
     def finish(self) -> None:
+        """Seal the last ONE_LINE update with a proper newline.
+
+        Call after all batches are done.  Without this, the shell prompt would
+        appear on the same line as the final progress output.
+        """
         if self.mode == ProgressMode.ONE_LINE and self._last_line_open:
             self.stream.write("\n")
             self.stream.flush()
             self._last_line_open = False
 
     def _format_line(self, label: str, current: int, total: int | None) -> str:
+        """Build the progress string.
+
+        Falls back to a plain "N rows" message when total is unknown (e.g. when
+        the connector lacks SELECT COUNT(*) permission — see SyncDB._safe_source_count).
+        """
         if not total or total <= 0:
             return f"{label} {current} rows"
+        # Clamp ratio to [0, 1] so an over-count (rows_written > total due to a
+        # stale COUNT) never produces a bar wider than 100 %.
         ratio = min(max(current / total, 0.0), 1.0)
         filled = int(self.width * ratio)
         bar = "#" * filled + "." * (self.width - filled)
