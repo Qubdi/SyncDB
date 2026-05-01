@@ -22,6 +22,7 @@ The seed scripts create deterministic fake data directly inside each database. T
   - [MSSQL](#mssql)
   - [PostgreSQL](#postgresql)
   - [MySQL](#mysql)
+- [Data Validation Container](#data-validation-container)
 - [Seeded Tables](#seeded-tables)
 - [Engine-Specific Datatype Testing](#engine-specific-datatype-testing)
   - [MSSQL `datatype_samples`](#mssql-datatype_samples)
@@ -37,9 +38,13 @@ Run from this folder:
 ```bash
 docker compose up -d --build
 docker compose run --rm mssql-init
+docker compose run --rm data-check
 ```
 
 PostgreSQL and MySQL seed automatically during first volume creation. MSSQL is seeded by the one-shot `mssql-init` job. The `--rm` flag deletes the init container after the seed script finishes.
+The `data-check` job validates seeded row counts in all three databases and is also deleted automatically by `--rm`.
+
+Run `mssql-init` before `data-check`. The MSSQL `admin/admin` login and MSSQL seed data are created by `mssql-init`, not by the base MSSQL container.
 
 ## Docker Images And Containers
 
@@ -52,6 +57,7 @@ Custom local images:
 - `qubdi-syncdb-pgadmin:9.14.0`
 - `qubdi-syncdb-phpmyadmin:5.2.3`
 - `qubdi-syncdb-cloudbeaver:26.0.3`
+- `qubdi-syncdb-data-check:1.0.0`
 
 Pinned upstream base images:
 
@@ -71,6 +77,7 @@ Container names:
 - `Qubdi-SyncDB-postgres-ide`
 - `Qubdi-SyncDB-mysql-ide`
 - `Qubdi-SyncDB-mssql-ide`
+- `Qubdi-SyncDB-data-check` only exists while `docker compose run --rm data-check` is running
 
 ## Browser Database IDEs
 
@@ -201,6 +208,40 @@ Connection string:
 mysql://admin:admin@localhost:13306/syncdb_test
 ```
 
+## Data Validation Container
+
+The stack includes a one-shot `data-check` container for validating that seed data exists in MSSQL, PostgreSQL, and MySQL.
+
+Run it after the databases are started and MSSQL is seeded:
+
+```bash
+docker compose run --rm data-check
+```
+
+If it fails with an MSSQL authentication error, run:
+
+```bash
+docker compose run --rm mssql-init
+docker compose run --rm data-check
+```
+
+Do not add `--build` to the `data-check` run command during normal use. Build happens in `docker compose up -d --build`; the check job should only validate the running stack.
+
+Behavior:
+
+- Exits `0` when all expected tables and row counts match.
+- Exits non-zero when a database is unavailable, a table is missing, or a row count is wrong.
+- Deletes itself after completion because it is run with `--rm`.
+
+The checker validates:
+
+- `customers`: 250,000 rows
+- `products`: 2,500 rows
+- `orders`: 1,000,000 rows
+- `payments`: 1,000,000 rows
+- `sync_audit`: 500 rows
+- `datatype_samples`: 25 rows
+
 ## Seeded Tables
 
 Each database receives the same logical dataset:
@@ -300,6 +341,7 @@ Includes MySQL-specific and MySQL-heavy types:
 docker compose down -v
 docker compose up -d --build
 docker compose run --rm mssql-init
+docker compose run --rm data-check
 ```
 
 Using `down -v` removes database volumes so the seed scripts run again.

@@ -15,6 +15,12 @@ services:
       - "11433:1433"
     volumes:
       - mssql-data:/var/opt/mssql
+    healthcheck:
+      test: [ "CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Admin123!' -Q 'SELECT 1' || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   # One-shot SQL Server seed job.
   # Run it with: docker compose run --rm mssql-init
@@ -28,7 +34,8 @@ services:
     profiles:
       - seed
     depends_on:
-      - mssql
+      mssql:
+        condition: service_healthy
     environment:
       MSSQL_SA_PASSWORD: "Admin123!"
     volumes:
@@ -76,7 +83,7 @@ services:
       - mysql-data:/var/lib/mysql
       - ./seed/mysql:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-padmin"]
+      test: [ "CMD-SHELL", "mysql --protocol=tcp -h 127.0.0.1 -uadmin -padmin syncdb_test -e 'SELECT 1' >/dev/null 2>&1 || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -126,11 +133,47 @@ services:
     image: qubdi-syncdb-cloudbeaver:26.0.3
     container_name: Qubdi-SyncDB-mssql-ide
     depends_on:
-      - mssql
+      mssql:
+        condition: service_healthy
     ports:
       - "18082:8978"
     volumes:
       - cloudbeaver-data:/opt/cloudbeaver/workspace
+
+  # One-shot data validation job.
+  # Run it with: docker compose run --rm data-check
+  # The container exits 0 when seeded row counts match, otherwise exits non-zero.
+  data-check:
+    build:
+      context: ./images/data-check
+    image: qubdi-syncdb-data-check:1.0.0
+    container_name: Qubdi-SyncDB-data-check
+    profiles:
+      - check
+    depends_on:
+      mssql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    environment:
+      MSSQL_HOST: "mssql"
+      MSSQL_PORT: "1433"
+      MSSQL_USER: "admin"
+      MSSQL_PASSWORD: "admin"
+      MSSQL_DATABASE: "syncdb_test"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "admin"
+      POSTGRES_PASSWORD: "admin"
+      POSTGRES_DATABASE: "syncdb_test"
+      MYSQL_HOST: "mysql"
+      MYSQL_PORT: "3306"
+      MYSQL_USER: "admin"
+      MYSQL_PASSWORD: "admin"
+      MYSQL_DATABASE: "syncdb_test"
+    restart: "no"
 
 # Named volumes keep database and IDE state between restarts.
 # Use `docker compose down -v` to delete all data and reseed from scratch.
