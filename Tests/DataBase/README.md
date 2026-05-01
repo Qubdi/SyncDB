@@ -37,15 +37,15 @@ Run from this folder:
 
 ```bash
 docker compose up -d --build
-docker compose logs data-check
+docker compose logs syncdb-data-check
 ```
 
-PostgreSQL and MySQL seed automatically during first volume creation. MSSQL is seeded by the one-shot `mssql-init` job. The `data-check` job runs automatically after all databases are healthy and MSSQL seed completes.
+PostgreSQL and MySQL seed automatically during first volume creation. MSSQL is seeded by the one-shot `syncdb-mssql-init` job. The `syncdb-data-check` job runs automatically after all databases are healthy and MSSQL seed completes.
 
-Because startup runs in detached mode, `mssql-init` and `data-check` remain visible as Exited containers after completion. Keep them for logs, or remove only those completed jobs with:
+Because startup runs in detached mode, `syncdb-mssql-init` and `syncdb-data-check` remain visible as Exited containers after completion. Keep them for logs, or remove only those completed jobs with:
 
 ```bash
-docker compose rm -f mssql-init data-check
+docker compose rm -f syncdb-mssql-init syncdb-data-check
 ```
 
 ## Docker Images And Containers

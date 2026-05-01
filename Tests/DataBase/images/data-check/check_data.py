@@ -145,7 +145,7 @@ def main() -> int:
             table_name=lambda table: f"dbo.{table}",
             auth_failure_hint=(
                 "The admin/admin login is created by the MSSQL seed job. "
-                "Check logs: docker compose logs mssql-init"
+                "Check logs: docker compose logs syncdb-mssql-init"
             ),
         ),
         DatabaseTarget(

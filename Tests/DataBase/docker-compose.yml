@@ -1,9 +1,11 @@
+name: qubdi-syncdb
+
 services:
 
   # Main SQL Server test database.
   # Use admin/admin for normal API and IDE connections.
   # Admin123! is only the internal sa bootstrap password required by SQL Server.
-  mssql:
+  syncdb-mssql:
     build:
       context: ./images/mssql
     image: qubdi-syncdb-mssql:2022-CU23-ubuntu-22.04
@@ -16,6 +18,10 @@ services:
       - "11433:1433"
     volumes:
       - mssql-data:/var/opt/mssql
+    networks:
+      syncdb-network:
+        aliases:
+          - mssql
     healthcheck:
       test: [ "CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Admin123!' -Q 'SELECT 1' || exit 1" ]
       interval: 10s
@@ -25,13 +31,13 @@ services:
 
   # One-shot SQL Server seed job. Runs automatically during `docker compose up -d --build`.
   # The completed container remains Exited (0) so logs are available after startup.
-  mssql-init:
+  syncdb-mssql-init:
     build:
       context: ./images/mssql-tools
     image: qubdi-syncdb-mssql-tools:2022-CU23-ubuntu-22.04
     container_name: Qubdi-SyncDB-mssql-init
     depends_on:
-      mssql:
+      syncdb-mssql:
         condition: service_healthy
     environment:
       MSSQL_SA_PASSWORD: "Admin123!"
@@ -39,10 +45,12 @@ services:
       - ./seed/mssql:/seed:ro
     command: bash /seed/init.sh
     restart: "no"
+    networks:
+      - syncdb-network
 
   # Main PostgreSQL test database.
   # Seed scripts are loaded automatically on first volume creation.
-  postgres:
+  syncdb-postgres:
     build:
       context: ./images/postgres
     image: qubdi-syncdb-postgres:18.3
@@ -56,6 +64,10 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql
       - ./seed/postgres:/docker-entrypoint-initdb.d:ro
+    networks:
+      syncdb-network:
+        aliases:
+          - postgres
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d syncdb_test"]
       interval: 10s
@@ -64,7 +76,7 @@ services:
 
   # Main MySQL test database.
   # Seed scripts are loaded automatically on first volume creation.
-  mysql:
+  syncdb-mysql:
     build:
       context: ./images/mysql
     image: qubdi-syncdb-mysql:9.7.0
@@ -79,6 +91,10 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
       - ./seed/mysql:/docker-entrypoint-initdb.d:ro
+    networks:
+      syncdb-network:
+        aliases:
+          - mysql
     healthcheck:
       test: [ "CMD-SHELL", "mysql --protocol=tcp -h 127.0.0.1 -uadmin -padmin syncdb_test -e 'SELECT 1' >/dev/null 2>&1 || exit 1" ]
       interval: 10s
@@ -87,13 +103,13 @@ services:
 
   # Browser IDE for PostgreSQL.
   # Open http://localhost:18080 and log in with admin@admin.com/admin.
-  postgres-ide:
+  syncdb-postgres-ide:
     build:
       context: ./images/pgadmin
     image: qubdi-syncdb-pgadmin:9.14.0
     container_name: Qubdi-SyncDB-postgres-ide
     depends_on:
-      - postgres
+      - syncdb-postgres
     environment:
       PGADMIN_DEFAULT_EMAIL: "admin@admin.com"
       PGADMIN_DEFAULT_PASSWORD: "admin"
@@ -103,16 +119,18 @@ services:
       - "18080:80"
     volumes:
       - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - syncdb-network
 
   # Browser IDE for MySQL.
   # Open http://localhost:18081 and log in with admin/admin.
-  mysql-ide:
+  syncdb-mysql-ide:
     build:
       context: ./images/phpmyadmin
     image: qubdi-syncdb-phpmyadmin:5.2.3
     container_name: Qubdi-SyncDB-mysql-ide
     depends_on:
-      - mysql
+      - syncdb-mysql
     environment:
       PMA_HOST: "mysql"
       PMA_PORT: "3306"
@@ -121,37 +139,41 @@ services:
       UPLOAD_LIMIT: "512M"
     ports:
       - "18081:80"
+    networks:
+      - syncdb-network
 
   # Browser IDE for MSSQL.
   # Open http://localhost:18082 and create a SQL Server connection with admin/admin.
-  mssql-ide:
+  syncdb-mssql-ide:
     build:
       context: ./images/cloudbeaver
     image: qubdi-syncdb-cloudbeaver:26.0.3
     container_name: Qubdi-SyncDB-mssql-ide
     depends_on:
-      mssql:
+      syncdb-mssql:
         condition: service_healthy
     ports:
       - "18082:8978"
     volumes:
       - cloudbeaver-data:/opt/cloudbeaver/workspace
+    networks:
+      - syncdb-network
 
   # One-shot data validation job. Runs automatically after all seed jobs finish.
   # The container exits 0 when seeded row counts match, otherwise exits non-zero.
-  data-check:
+  syncdb-data-check:
     build:
       context: ./images/data-check
     image: qubdi-syncdb-data-check:1.0.0
     container_name: Qubdi-SyncDB-data-check
     depends_on:
-      mssql-init:
+      syncdb-mssql-init:
         condition: service_completed_successfully
-      mssql:
+      syncdb-mssql:
         condition: service_healthy
-      postgres:
+      syncdb-postgres:
         condition: service_healthy
-      mysql:
+      syncdb-mysql:
         condition: service_healthy
     environment:
       MSSQL_HOST: "mssql"
@@ -171,6 +193,8 @@ services:
       MYSQL_DATABASE: "syncdb_test"
       FORCE_COLOR: "1"
     restart: "no"
+    networks:
+      - syncdb-network
 
 # Named volumes keep database and IDE state between restarts.
 # Use `docker compose down -v` to delete all data and reseed from scratch.
@@ -180,6 +204,9 @@ volumes:
   mysql-data:
   pgadmin-data:
   cloudbeaver-data:
+
+networks:
+  syncdb-network:
 
 
 
