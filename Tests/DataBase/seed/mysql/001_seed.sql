@@ -178,7 +178,7 @@ SELECT
         WHEN 1 THEN 2500
         ELSE 1000000
     END,
-    MD5(CONCAT('syncdb-', id))
+    SHA2(CONCAT('syncdb-', id), 256)
 FROM seq_1000000
 WHERE id <= 500;
 
@@ -222,14 +222,14 @@ SELECT
     id * 1.5,
     id * 1.2345,
     DATE_ADD('2024-01-01', INTERVAL id DAY),
-    TIME(DATE_ADD('00:00:00', INTERVAL id * 17 SECOND)),
+    SEC_TO_TIME(id * 17),
     DATE_ADD('2024-01-01 00:00:00.000000', INTERVAL id MICROSECOND),
     DATE_ADD('2024-01-01 00:00:00.000000', INTERVAL id MINUTE),
     2020 + (id % 6),
     LEFT(CONCAT('char-', id, '          '), 10),
     CONCAT('varchar sample ', id),
     CONCAT('text sample ', id, ' for mysql'),
-    UNHEX(MD5(CONCAT('binary-', id))),
+    UNHEX(SUBSTRING(SHA2(CONCAT('binary-', id), 256), 1, 32)),
     UNHEX(SHA2(CONCAT('varbinary-', id), 256)),
     UNHEX(SHA2(CONCAT('blob-', id), 512)),
     JSON_OBJECT('sample_id', id, 'engine', 'mysql', 'active', id % 2 = 0),
