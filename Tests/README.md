@@ -10,13 +10,36 @@ The Compose file builds local Qubdi SyncDB test images and starts branded contai
 
 The seed scripts create deterministic fake data directly inside each database. This gives enough data for batch transfer, schema sync, progress bar, filtering, and validation tests without committing large generated files.
 
+## Table Of Contents
+
+- [Start Databases](#start-databases)
+- [Docker Images And Containers](#docker-images-and-containers)
+- [Browser Database IDEs](#browser-database-ides)
+  - [PostgreSQL IDE](#postgresql-ide)
+  - [MySQL IDE](#mysql-ide)
+  - [MSSQL IDE](#mssql-ide)
+- [Connection Details](#connection-details)
+  - [MSSQL](#mssql)
+  - [PostgreSQL](#postgresql)
+  - [MySQL](#mysql)
+- [Seeded Tables](#seeded-tables)
+- [Engine-Specific Datatype Testing](#engine-specific-datatype-testing)
+  - [MSSQL `datatype_samples`](#mssql-datatype_samples)
+  - [PostgreSQL `datatype_samples`](#postgresql-datatype_samples)
+  - [MySQL `datatype_samples`](#mysql-datatype_samples)
+- [Reset Everything](#reset-everything)
+- [Intended Test Coverage](#intended-test-coverage)
+
 ## Start Databases
 
 Run from this folder:
 
 ```bash
 docker compose up -d --build
+docker compose run --rm mssql-init
 ```
+
+PostgreSQL and MySQL seed automatically during first volume creation. MSSQL is seeded by the one-shot `mssql-init` job. The `--rm` flag deletes the init container after the seed script finishes.
 
 ## Docker Images And Containers
 
@@ -42,7 +65,7 @@ Pinned upstream base images:
 Container names:
 
 - `Qubdi-SyncDB-mssql`
-- `Qubdi-SyncDB-mssql-init`
+- `Qubdi-SyncDB-mssql-init` only exists while `docker compose run --rm mssql-init` is running
 - `Qubdi-SyncDB-postgres`
 - `Qubdi-SyncDB-mysql`
 - `Qubdi-SyncDB-postgres-ide`
@@ -276,9 +299,10 @@ Includes MySQL-specific and MySQL-heavy types:
 ```bash
 docker compose down -v
 docker compose up -d --build
+docker compose run --rm mssql-init
 ```
 
-Using `down -v` removes database volumes so the init scripts run again.
+Using `down -v` removes database volumes so the seed scripts run again.
 
 ## Intended Test Coverage
 
@@ -293,5 +317,3 @@ Using `down -v` removes database volumes so the init scripts run again.
 - append mode
 - append staging mode
 - full refresh mode
-- one-line progress mode
-- multi-line progress mode

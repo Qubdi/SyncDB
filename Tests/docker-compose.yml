@@ -1,4 +1,7 @@
 services:
+  # Main SQL Server test database.
+  # Use admin/admin for normal API and IDE connections.
+  # Admin123! is only the internal sa bootstrap password required by SQL Server.
   mssql:
     build:
       context: ./images/mssql
@@ -13,11 +16,17 @@ services:
     volumes:
       - mssql-data:/var/opt/mssql
 
+  # One-shot SQL Server seed job.
+  # Run it with: docker compose run --rm mssql-init
+  # The --rm flag deletes this init container after the seed script finishes.
+  # It is behind a profile so normal `docker compose up` does not leave an exited init container.
   mssql-init:
     build:
       context: ./images/mssql-tools
     image: qubdi-syncdb-mssql-tools:2022-CU23-ubuntu-22.04
     container_name: Qubdi-SyncDB-mssql-init
+    profiles:
+      - seed
     depends_on:
       - mssql
     environment:
@@ -27,6 +36,8 @@ services:
     command: bash /seed/init.sh
     restart: "no"
 
+  # Main PostgreSQL test database.
+  # Seed scripts are loaded automatically on first volume creation.
   postgres:
     build:
       context: ./images/postgres
@@ -47,6 +58,8 @@ services:
       timeout: 5s
       retries: 10
 
+  # Main MySQL test database.
+  # Seed scripts are loaded automatically on first volume creation.
   mysql:
     build:
       context: ./images/mysql
@@ -68,6 +81,8 @@ services:
       timeout: 5s
       retries: 10
 
+  # Browser IDE for PostgreSQL.
+  # Open http://localhost:18080 and log in with admin@admin.com/admin.
   postgres-ide:
     build:
       context: ./images/pgadmin
@@ -85,6 +100,8 @@ services:
     volumes:
       - pgadmin-data:/var/lib/pgadmin
 
+  # Browser IDE for MySQL.
+  # Open http://localhost:18081 and log in with admin/admin.
   mysql-ide:
     build:
       context: ./images/phpmyadmin
@@ -101,6 +118,8 @@ services:
     ports:
       - "18081:80"
 
+  # Browser IDE for MSSQL.
+  # Open http://localhost:18082 and create a SQL Server connection with admin/admin.
   mssql-ide:
     build:
       context: ./images/cloudbeaver
@@ -113,6 +132,8 @@ services:
     volumes:
       - cloudbeaver-data:/opt/cloudbeaver/workspace
 
+# Named volumes keep database and IDE state between restarts.
+# Use `docker compose down -v` to delete all data and reseed from scratch.
 volumes:
   mssql-data:
   postgres-data:
