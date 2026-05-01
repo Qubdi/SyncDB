@@ -1,4 +1,5 @@
 services:
+
   # Main SQL Server test database.
   # Use admin/admin for normal API and IDE connections.
   # Admin123! is only the internal sa bootstrap password required by SQL Server.
@@ -22,17 +23,13 @@ services:
       retries: 20
       start_period: 30s
 
-  # One-shot SQL Server seed job.
-  # Run it with: docker compose run --rm mssql-init
-  # The --rm flag deletes this init container after the seed script finishes.
-  # It is behind a profile so normal `docker compose up` does not leave an exited init container.
+  # One-shot SQL Server seed job. Runs automatically during `docker compose up -d --build`.
+  # The completed container remains Exited (0) so logs are available after startup.
   mssql-init:
     build:
       context: ./images/mssql-tools
     image: qubdi-syncdb-mssql-tools:2022-CU23-ubuntu-22.04
     container_name: Qubdi-SyncDB-mssql-init
-    profiles:
-      - seed
     depends_on:
       mssql:
         condition: service_healthy
@@ -140,17 +137,16 @@ services:
     volumes:
       - cloudbeaver-data:/opt/cloudbeaver/workspace
 
-  # One-shot data validation job.
-  # Run it with: docker compose run --rm data-check
+  # One-shot data validation job. Runs automatically after all seed jobs finish.
   # The container exits 0 when seeded row counts match, otherwise exits non-zero.
   data-check:
     build:
       context: ./images/data-check
     image: qubdi-syncdb-data-check:1.0.0
     container_name: Qubdi-SyncDB-data-check
-    profiles:
-      - check
     depends_on:
+      mssql-init:
+        condition: service_completed_successfully
       mssql:
         condition: service_healthy
       postgres:
@@ -173,6 +169,7 @@ services:
       MYSQL_USER: "admin"
       MYSQL_PASSWORD: "admin"
       MYSQL_DATABASE: "syncdb_test"
+      FORCE_COLOR: "1"
     restart: "no"
 
 # Named volumes keep database and IDE state between restarts.
@@ -183,3 +180,6 @@ volumes:
   mysql-data:
   pgadmin-data:
   cloudbeaver-data:
+
+
+

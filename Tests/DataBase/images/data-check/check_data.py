@@ -18,6 +18,26 @@ EXPECTED_COUNTS = {
     "datatype_samples": 25,
 }
 
+LINE = "-" * 76
+USE_COLOR = os.environ.get("NO_COLOR", "").lower() not in {"1", "true", "yes"}
+
+
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+
+
+def color(text: str, code: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"{code}{text}{Color.RESET}"
+
 
 @dataclass(frozen=True)
 class DatabaseTarget:
@@ -42,18 +62,34 @@ def is_auth_failure(exc: Exception) -> bool:
     return any(marker in text for marker in auth_markers)
 
 
+def print_header(title: str) -> None:
+    print()
+    print(color(LINE, Color.CYAN))
+    print(color(title, Color.BOLD + Color.CYAN))
+    print(color(LINE, Color.CYAN))
+
+
+def print_count_header() -> None:
+    print(color(f"{'table':<20} {'expected':>12} {'actual':>12} {'status':>10}", Color.BOLD))
+    print(color(f"{'-' * 20} {'-' * 12} {'-' * 12} {'-' * 10}", Color.DIM))
+
+
 def wait_for_connection(target: DatabaseTarget, attempts: int = 60, delay_seconds: int = 2):
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
             conn = target.connect()
-            print(f"{target.name}: connection ready")
+            print(f"{color(target.name, Color.BOLD)}: {color('connection ready', Color.GREEN)}")
+            print(color(LINE, Color.DIM))
             return conn
         except Exception as exc:
             last_error = exc
             if target.auth_failure_hint and is_auth_failure(exc):
                 raise RuntimeError(f"{target.name}: authentication failed. {target.auth_failure_hint}") from exc
-            print(f"{target.name}: waiting for connection ({attempt}/{attempts}) - {exc}")
+            print(
+                f"{color(target.name, Color.BOLD)}: "
+                f"{color(f'waiting for connection ({attempt}/{attempts})', Color.YELLOW)} - {exc}"
+            )
             time.sleep(delay_seconds)
 
     raise RuntimeError(f"{target.name}: connection failed after {attempts} attempts: {last_error}")
@@ -69,15 +105,18 @@ def fetch_count(conn, target: DatabaseTarget, table: str) -> int:
 
 def check_database(target: DatabaseTarget) -> list[str]:
     errors = []
+    print_header(f"{target.name.upper()} DATA VALIDATION")
     conn = wait_for_connection(target)
     try:
-        print(f"\n{target.name}: validating seeded row counts")
+        print_count_header()
         for table, expected in EXPECTED_COUNTS.items():
             actual = fetch_count(conn, target, table)
-            status = "OK" if actual == expected else "FAIL"
-            print(f"{target.name}: {table:<18} expected={expected:<10} actual={actual:<10} {status}")
+            passed = actual == expected
+            status_text = "OK" if passed else "FAIL"
+            status = color(f"{status_text:>10}", Color.GREEN if passed else Color.RED)
+            print(f"{table:<20} {expected:>12,} {actual:>12,} {status}")
 
-            if actual != expected:
+            if not passed:
                 errors.append(
                     f"{target.name}.{table}: expected {expected}, got {actual}"
                 )
@@ -88,6 +127,9 @@ def check_database(target: DatabaseTarget) -> list[str]:
 
 
 def main() -> int:
+    print_header("QUBDI SYNCDB SEED DATA CHECK")
+    print("Expected row counts will be validated in MSSQL, PostgreSQL, and MySQL.")
+
     targets = [
         DatabaseTarget(
             name="mssql",
@@ -103,7 +145,7 @@ def main() -> int:
             table_name=lambda table: f"dbo.{table}",
             auth_failure_hint=(
                 "The admin/admin login is created by the MSSQL seed job. "
-                "Run: docker compose run --rm mssql-init"
+                "Check logs: docker compose logs mssql-init"
             ),
         ),
         DatabaseTarget(
@@ -140,15 +182,17 @@ def main() -> int:
             all_errors.append(f"{target.name}: validation failed with error: {exc}")
 
     if all_errors:
-        print("\nDATA CHECK FAILED")
+        print_header("DATA CHECK FAILED")
         for error in all_errors:
-            print(f"- {error}")
+            print(color(f"- {error}", Color.RED))
         return 1
 
-    print("\nDATA CHECK PASSED")
-    print("All expected tables and row counts are present in MSSQL, PostgreSQL, and MySQL.")
+    print_header("DATA CHECK PASSED")
+    print(color("All expected tables and row counts are present in MSSQL, PostgreSQL, and MySQL.", Color.GREEN))
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
