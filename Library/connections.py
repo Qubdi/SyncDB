@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from .config import DatabaseConfig, normalize_engine
+from .config import DatabaseConfig
 from .connectors import MSSQLConnector, MySQLConnector, PostgresConnector
 from .connectors.base import BaseConnector
 
 
 def create_connector(config: DatabaseConfig) -> BaseConnector:
-    engine = normalize_engine(config.engine).value
-    if engine == "mssql":
+    # config.engine is already normalized to a canonical string by DatabaseConfig.__post_init__.
+    if config.engine == "mssql":
         return MSSQLConnector(config)
-    if engine == "postgresql":
+    if config.engine == "postgresql":
         return PostgresConnector(config)
-    if engine == "mysql":
+    if config.engine == "mysql":
         return MySQLConnector(config)
     raise ValueError(f"Unsupported database engine: {config.engine}")

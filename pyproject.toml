@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syncdb"
+version = "0.1.0"
+description = "ETL helper for moving tabular data between MSSQL, PostgreSQL, MySQL, and local files"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+mssql      = ["pyodbc>=4.0"]
+postgres   = ["psycopg2-binary>=2.9"]
+mysql      = ["mysql-connector-python>=8.0"]
+files      = ["pandas>=2.0", "pyarrow>=14.0", "openpyxl>=3.1"]
+all        = [
+    "pyodbc>=4.0",
+    "psycopg2-binary>=2.9",
+    "mysql-connector-python>=8.0",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "openpyxl>=3.1",
+]
+dev        = [
+    "pyodbc>=4.0",
+    "psycopg2-binary>=2.9",
+    "mysql-connector-python>=8.0",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "openpyxl>=3.1",
+    "pytest>=8.0",
+]
+
+# Maps the public package name "syncdb" to the Library/ source directory.
+# After `pip install -e .`, `import syncdb` resolves to Library/.
+[tool.setuptools.packages]
+find = { where = ["."], include = ["Library*"] }
+
+[tool.setuptools.package-dir]
+"syncdb"            = "Library"
+"syncdb.connectors" = "Library/connectors"
+"syncdb.pipelines"  = "Library/pipelines"
+
+[tool.pytest.ini_options]
+testpaths = ["Tests/Library"]

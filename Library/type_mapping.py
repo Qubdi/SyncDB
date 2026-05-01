@@ -148,7 +148,12 @@ class SchemaMapper:
         if data_type in {"int", "integer", "serial", "mediumint"}:
             return "bigint" if unsigned else "int"
         if data_type in {"smallint", "tinyint"}:
-            return "int" if unsigned and data_type == "smallint" else "smallint"
+            if unsigned and data_type == "smallint":
+                return "int"
+            # MySQL TINYINT UNSIGNED (0-255) maps exactly to MSSQL TINYINT (0-255).
+            if unsigned and data_type == "tinyint":
+                return "tinyint"
+            return "smallint"
         if data_type in {"boolean", "bool", "bit"}:
             return "bit"
         if data_type in {"uuid", "uniqueidentifier"}:

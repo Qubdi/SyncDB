@@ -75,6 +75,10 @@ class MemoryConnector(BaseConnector):
         return len(keys)
 
 
+def _make_sync(source, target, **kwargs) -> "SyncDB":
+    return SyncDB(source_connector=source, target_connector=target, progress_mode=ProgressMode.NONE, **kwargs)
+
+
 class SyncDBTests(unittest.TestCase):
     def test_sync_tables_creates_schema_table_and_batches_rows(self):
         source = MemoryConnector(
@@ -95,12 +99,7 @@ class SyncDBTests(unittest.TestCase):
             },
         )
         target = MemoryConnector("postgresql", "public")
-        sync = SyncDB(
-            source_connector=source,
-            target_connector=target,
-            batch_size=2,
-            progress_mode=ProgressMode.NONE,
-        )
+        sync = _make_sync(source, target, batch_size=2)
 
         results = sync.sync_tables(
             {
@@ -131,11 +130,7 @@ class SyncDBTests(unittest.TestCase):
             rows_by_table={(None, "orders"): [{"id": 1}]},
             columns_by_table={(None, "orders"): [Column("id", "int", is_primary_key=True)]},
         )
-        sync = SyncDB(
-            source_connector=source,
-            target_connector=target,
-            progress_mode=ProgressMode.NONE,
-        )
+        sync = _make_sync(source, target)
 
         result = sync.sync_tables(
             {
@@ -159,18 +154,79 @@ class SyncDBTests(unittest.TestCase):
             columns_by_table={("dbo", "products"): [Column("id", "int", is_primary_key=True)]},
         )
         target = MemoryConnector("postgresql", "public")
-        sync = SyncDB(
-            source_connector=source,
-            target_connector=target,
-            progress_mode=ProgressMode.NONE,
-            dry_run=True,
-        )
+        sync = _make_sync(source, target, dry_run=True)
 
         result = sync.sync_tables({"products": {"source": "dbo.products", "destination": "public.products"}})[0]
 
         self.assertTrue(result.table_created)
         self.assertEqual(target.rows_by_table, {})
         self.assertEqual(target.columns_by_table, {})
+
+    def test_drop_extra_columns_removes_columns_not_in_source(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "items"): [{"id": 1}]},
+            columns_by_table={("dbo", "items"): [Column("id", "int", is_primary_key=True)]},
+        )
+        target = MemoryConnector(
+            "postgresql",
+            "public",
+            rows_by_table={("public", "items"): []},
+            columns_by_table={
+                ("public", "items"): [
+                    Column("id", "integer", is_primary_key=True),
+                    Column("legacy_col", "text"),
+                ]
+            },
+        )
+        sync = _make_sync(source, target, drop_extra_columns=True)
+
+        result = sync.sync_tables({"items": {"source": "dbo.items", "destination": "public.items"}})[0]
+
+        self.assertEqual(result.columns_dropped, ["legacy_col"])
+        col_names = [c.name for c in target.columns_by_table[("public", "items")]]
+        self.assertNotIn("legacy_col", col_names)
+
+    def test_export_query_to_file_writes_rows(self):
+        import tempfile
+        from pathlib import Path
+
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "t"): [{"id": 1}, {"id": 2}]},
+            columns_by_table={("dbo", "t"): [Column("id", "int")]},
+        )
+        sync = SyncDB(source_connector=source, progress_mode=ProgressMode.NONE)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "out.csv"
+            count = sync.export_query_to_file("SELECT id FROM t", path)
+
+        self.assertEqual(count, 2)
+
+    def test_import_file_to_table_creates_table_and_inserts(self):
+        import io
+
+        target = MemoryConnector("postgresql", "public")
+        sync = SyncDB(target_connector=target, progress_mode=ProgressMode.NONE)
+
+        csv_content = "id,name\n1,Ana\n2,Gio\n"
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False) as f:
+            f.write(csv_content)
+            tmp_path = Path(f.name)
+
+        try:
+            count = sync.import_file_to_table(tmp_path, "public.people")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        self.assertEqual(count, 2)
+        self.assertIn(("public", "people"), target.rows_by_table)
 
 
 if __name__ == "__main__":

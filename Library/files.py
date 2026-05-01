@@ -60,7 +60,14 @@ class FileTransfer:
         suffix = path.suffix.lower().lstrip(".")
         if suffix in {"xlsx", "xls"}:
             return FileFormat.EXCEL
-        return FileFormat(suffix)
+        try:
+            return FileFormat(suffix)
+        except ValueError:
+            supported = ", ".join(f.value for f in FileFormat)
+            raise ValueError(
+                f"Cannot infer file format from extension '.{suffix}'. "
+                f"Supported: {supported}. Pass file_format explicitly to override."
+            ) from None
 
     def _write_csv(self, records: list[dict[str, Any]], path: Path) -> None:
         fieldnames = list(records[0].keys()) if records else []

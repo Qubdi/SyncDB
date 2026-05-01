@@ -112,7 +112,12 @@ class BaseConnector(ABC):
         rows: Sequence[dict[str, Any]],
         primary_key: Sequence[str],
     ) -> int:
-        """Delete target rows matching incoming primary-key values."""
+        """Delete target rows matching incoming primary-key values.
+
+        Builds a single DELETE ... WHERE (pk1=? AND pk2=?) OR (...) statement.
+        For large batch_size values this OR-list grows proportionally; consider
+        a smaller batch_size if DELETE latency becomes a bottleneck.
+        """
         if not rows or not primary_key:
             return 0
         predicates = []

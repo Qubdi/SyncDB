@@ -26,9 +26,14 @@ class MySQLConnector(BaseConnector):
                 import pymysql
             except ImportError as exc:
                 raise ImportError("mysql-connector-python or pymysql is required for MySQL connections") from exc
+            # pymysql uses connect_timeout (matches our config key directly)
             self.connection = pymysql.connect(**self._connection_kwargs())
             return
-        self.connection = mysql_connector.connect(**self._connection_kwargs())
+        # mysql-connector-python uses connection_timeout, not connect_timeout
+        kwargs = self._connection_kwargs()
+        if "connect_timeout" in kwargs:
+            kwargs["connection_timeout"] = kwargs.pop("connect_timeout")
+        self.connection = mysql_connector.connect(**kwargs)
 
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
         self.connect()

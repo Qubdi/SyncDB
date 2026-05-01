@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 from .base import BaseConnector
-from ..sql import quote_identifier
+from ..sql import quote_identifier, validate_identifier
 from ..type_mapping import Column
 
 
@@ -138,6 +138,9 @@ class MSSQLConnector(BaseConnector):
     def create_schema(self, schema: str | None) -> None:
         if not schema:
             return
+        # validate_identifier is also called upstream by parse_qualified_name,
+        # but we enforce it here too since schema is embedded in a raw string.
+        validate_identifier(schema)
         self.execute_query(f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC(N'CREATE SCHEMA {schema}')")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:

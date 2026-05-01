@@ -78,6 +78,8 @@ class SyncDB:
                 results.append(self._sync_one_table(name, spec))
         finally:
             self.progress.finish()
+            self.source.close()
+            self.target.close()
         return results
 
     def export_query_to_file(
@@ -91,7 +93,10 @@ class SyncDB:
         if self.source is None:
             raise ValueError("source connector/config is required for export")
         self.source.connect()
-        rows = self.source.execute_query(query, params or [])
+        try:
+            rows = self.source.execute_query(query, params or [])
+        finally:
+            self.source.close()
         return self.file_transfer.write(rows, output_path, file_format)
 
     def import_file_to_table(
@@ -107,14 +112,17 @@ class SyncDB:
         rows = self.file_transfer.read(input_path, file_format)
         target_name = parse_qualified_name(destination, self.target.config.default_schema)
         self.target.connect()
-        if not self.target.table_exists(target_name.schema, target_name.table):
-            self.target.create_schema(target_name.schema)
-            self.target.create_table(target_name.schema, target_name.table, self._infer_columns(rows))
-        elif fresh_insert:
-            self.target.truncate_table(target_name.schema, target_name.table)
-        if not rows:
-            return 0
-        return self.target.insert_batch(target_name.schema, target_name.table, rows, list(rows[0].keys()))
+        try:
+            if not self.target.table_exists(target_name.schema, target_name.table):
+                self.target.create_schema(target_name.schema)
+                self.target.create_table(target_name.schema, target_name.table, self._infer_columns(rows))
+            elif fresh_insert:
+                self.target.truncate_table(target_name.schema, target_name.table)
+            if not rows:
+                return 0
+            return self.target.insert_batch(target_name.schema, target_name.table, rows, list(rows[0].keys()))
+        finally:
+            self.target.close()
 
     def _sync_one_table(self, name: str, spec: dict[str, Any]) -> TableSyncResult:
         if "source" not in spec or "destination" not in spec:
@@ -147,6 +155,9 @@ class SyncDB:
         column_names = [column.name for column in source_columns]
         primary_key = list(spec.get("primary_key") or [column.name for column in source_columns if column.is_primary_key])
 
+        # NOTE: append_staging is not yet distinguished from append at the
+        # pipeline level. True staging (bulk-load to a temp table, swap once)
+        # requires connector-level support and will be added later.
         for batch in self.source.fetch_batches(
             source_name.schema,
             source_name.table,
@@ -205,6 +216,8 @@ class SyncDB:
         where: str,
         params: Sequence[Any],
     ) -> int | None:
+        # Row count is used only for progress display; swallowing errors here
+        # means a missing COUNT permission won't abort an otherwise valid sync.
         try:
             return self.source.get_row_count(schema, table, where, params)
         except Exception:
