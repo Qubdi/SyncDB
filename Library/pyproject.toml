@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syncdb"
+version = "0.1.0"
+description = "Class-based ETL and database synchronization helpers for MSSQL, PostgreSQL, MySQL, and local files."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "SyncDB maintainers" }]
+dependencies = []
+
+[project.optional-dependencies]
+mssql = ["pyodbc==5.3.0"]
+postgresql = ["psycopg2-binary==2.9.11"]
+mysql = ["mysql-connector-python==9.7.0"]
+files = ["pandas==2.3.3", "pyarrow==24.0.0", "openpyxl==3.1.5"]
+all = [
+    "pyodbc==5.3.0",
+    "psycopg2-binary==2.9.11",
+    "mysql-connector-python==9.7.0",
+    "pandas==2.3.3",
+    "pyarrow==24.0.0",
+    "openpyxl==3.1.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["syncdb*"]
