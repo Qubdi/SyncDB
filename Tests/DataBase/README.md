@@ -233,6 +233,7 @@ Behavior:
 - Remains as an Exited container after detached startup so its logs are available.
 
 The checker validates:
+
 - `customers`: 250,000 rows
 - `products`: 2,500 rows
 - `orders`: 1,000,000 rows
@@ -356,6 +357,3 @@ Using `down -v` removes database volumes so the seed scripts run again.
 - append mode
 - append staging mode
 - full refresh mode
-
-
-
