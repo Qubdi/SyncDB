@@ -1,4 +1,9 @@
-"""High-level SyncDB orchestration API."""
+"""High-level SyncDB orchestration API.
+
+This module coordinates connectors, schema mapping, batching, retries, progress,
+and file IO. Keep connector-specific SQL out of this layer; SyncDB should express
+workflow policy while connector classes own engine syntax and driver behavior.
+"""
 
 from __future__ import annotations
 
@@ -71,9 +76,9 @@ class SyncDB:
     """Main class-based API for database and local-file synchronization.
 
     Typical usage patterns:
-      - Database → database:  supply both source and target; call sync_tables().
-      - Database → file:      supply source only; call export_query_to_file().
-      - File → database:      supply target only; call import_file_to_table().
+      - Database to database: supply both source and target; call sync_tables().
+      - Database to file:     supply source only; call export_query_to_file().
+      - File to database:     supply target only; call import_file_to_table().
 
     source/target accept either a DatabaseConfig (connector is created internally)
     or an already-constructed BaseConnector (useful for testing with a mock connector).
@@ -238,7 +243,7 @@ class SyncDB:
     ) -> int:
         """Execute a source query and write its rows to a local file.
 
-        query can be a SQL string or a path to a .sql file — the file is read
+        query can be a SQL string or a path to a .sql file; the file is read
         and its contents used as the query string.
         Returns the number of rows written.  file_format overrides extension-based
         detection when the output path's suffix is ambiguous or missing.
@@ -286,6 +291,12 @@ class SyncDB:
             self.target.close()
 
     def _sync_one_table(self, name: str, spec: dict[str, Any]) -> TableSyncResult:
+        """Synchronize a single table spec and return audited runtime details.
+
+        This is the main workflow body. Keep it readable and policy-oriented:
+        parse the spec, align schema, stream batches, then apply optional modes
+        such as staging, snapshots, soft deletes, watermarks, and expectations.
+        """
         if "source" not in spec or "destination" not in spec:
             raise ValueError(f"Table spec '{name}' must include source and destination")
 
@@ -470,6 +481,7 @@ class SyncDB:
         return [*columns, Column(name=name, data_type=data_type, nullable=True)]
 
     def _timestamp_type(self) -> str:
+        """Return a portable timestamp type for SyncDB-managed metadata columns."""
         if self.target.engine == "mssql":
             return "datetime2"
         if self.target.engine == "sqlite":
@@ -547,6 +559,7 @@ class SyncDB:
         return self._with_retries(lambda: self.target.update_matching_rows(schema, table, missing, primary_key, {"deleted_at": deleted_at}))
 
     def _load_watermark(self, spec: dict[str, Any]) -> dict[str, Any] | None:
+        """Load incremental-sync state for a table spec, if configured."""
         column = spec.get("incremental_column")
         store = spec.get("watermark_store")
         if not column:
@@ -558,6 +571,7 @@ class SyncDB:
         return {"path": path, "key": key, "column": column, "value": values.get(key)}
 
     def _read_watermark_file(self, path: Path) -> dict[str, Any]:
+        """Read the JSON watermark store, returning an empty mapping when absent."""
         if not path.exists():
             return {}
         with path.open("r", encoding="utf-8") as handle:
@@ -565,6 +579,7 @@ class SyncDB:
         return data if isinstance(data, dict) else {}
 
     def _save_watermark(self, config: dict[str, Any], value: Any) -> None:
+        """Persist the latest processed incremental value after a successful sync."""
         path: Path = config["path"]
         values = self._read_watermark_file(path)
         values[config["key"]] = value.isoformat() if hasattr(value, "isoformat") else value
@@ -579,6 +594,7 @@ class SyncDB:
         column: str,
         value: Any,
     ) -> tuple[str, list[Any]]:
+        """Append an incremental-column predicate to an existing WHERE clause."""
         if value in {None, ""}:
             return where_sql, params
         condition = f"{quote_identifier(column, self.source.quote_char)} > {self.source.placeholder}"
@@ -590,6 +606,7 @@ class SyncDB:
         return f" WHERE ({existing}) AND ({condition}) ", [*params, value]
 
     def _max_value(self, current: Any, rows: list[dict[str, Any]], column: str) -> Any:
+        """Track the maximum non-null watermark value seen across fetched batches."""
         values = [row.get(column) for row in rows if row.get(column) is not None]
         if not values:
             return current
@@ -693,7 +710,7 @@ class SyncDB:
 
     @staticmethod
     def _parse_batch_size(batch_size: int | str) -> tuple[int, float | None]:
-        """Parse batch_size — accepts an integer count or a percentage string like '10%'."""
+        """Parse batch_size; accepts an integer count or a percentage string like '10%'."""
         if isinstance(batch_size, str):
             stripped = batch_size.strip()
             if not stripped.endswith("%"):
@@ -716,7 +733,7 @@ class SyncDB:
 
     @staticmethod
     def _resolve_query(query: str | Path) -> str:
-        """Return the SQL string — reading it from a .sql file when a path is given."""
+        """Return the SQL string, reading it from a .sql file when a path is given."""
         path = Path(query)
         if path.suffix.lower() == ".sql" and path.exists():
             return path.read_text(encoding="utf-8")

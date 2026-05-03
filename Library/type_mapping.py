@@ -2,8 +2,12 @@
 
 The SchemaMapper translates SQL types between MSSQL, PostgreSQL, and MySQL so that
 column definitions remain semantically equivalent after crossing engine boundaries.
-Type mapping is intentionally lossy in some directions — the goal is a working
+Type mapping is intentionally lossy in some directions; the goal is a working
 target column, not bit-perfect round-trip fidelity.
+
+When adding mappings, prefer preserving value range and common query behavior
+over preserving the exact source type name. Cross-engine DDL must be useful on
+the target database, not merely familiar to the source database.
 """
 
 from __future__ import annotations
@@ -219,7 +223,7 @@ class SchemaMapper:
             return "time"
         if data_type in {"varchar", "nvarchar", "character varying", "char", "nchar", "text", "json", "jsonb", "xml", "enum", "set"}:
             # Always use nvarchar (Unicode) for MSSQL to avoid data loss when the
-            # source contains multibyte characters.  Unbounded → nvarchar(max).
+            # source contains multibyte characters. Unbounded maps to nvarchar(max).
             return self._varchar(char_length, "nvarchar", unbounded="nvarchar(max)")
         if data_type in {"bytea", "binary", "varbinary", "blob", "longblob", "mediumblob", "tinyblob"}:
             return "varbinary(max)"
@@ -241,7 +245,7 @@ class SchemaMapper:
         if data_type in {"smallint", "tinyint"}:
             return "smallint"
         if data_type in {"boolean", "bool", "bit"}:
-            # MySQL's canonical boolean is TINYINT(1) — BIT(1) exists but is
+            # MySQL's canonical boolean is TINYINT(1); BIT(1) exists but is
             # treated inconsistently by different drivers and ORMs.
             return "tinyint(1)"
         if data_type in {"uuid", "uniqueidentifier"}:

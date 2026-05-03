@@ -3,6 +3,10 @@
 Uses pyodbc as the DB-API driver.  pyodbc is not a hard install-time dependency;
 the ImportError is raised lazily on the first connect() call so that users who only
 work with PostgreSQL or MySQL don't need the ODBC stack installed.
+
+Keep MSSQL-specific syntax in this module. Shared behavior belongs in
+BaseConnector only when PostgreSQL, MySQL, and SQLite can execute the same shape
+of SQL with their own quote characters and placeholders.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ class MSSQLConnector(BaseConnector):
     placeholder = "?"
 
     def connect(self) -> None:
+        """Open an idempotent pyodbc connection for SQL Server."""
         if self.connection is not None:
             return
         try:
@@ -170,7 +175,7 @@ class MSSQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        # MSSQL uses "ALTER TABLE … ADD col type" (no "COLUMN" keyword).
+        # MSSQL uses "ALTER TABLE ADD col type" (no "COLUMN" keyword).
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:

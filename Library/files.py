@@ -3,6 +3,10 @@
 Supports CSV, Parquet, Excel, and Pickle without making pandas a hard dependency:
 CSV and Pickle use only the stdlib; pandas is imported lazily and only when a
 Parquet or Excel path is encountered.
+
+All public methods convert file content to list[dict[str, Any]]. That shape is
+the handoff contract with SyncDB and connectors; preserve it when adding new
+formats so pipelines do not need format-specific branches.
 """
 
 from __future__ import annotations

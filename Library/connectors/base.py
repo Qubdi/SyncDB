@@ -4,6 +4,10 @@ BaseConnector defines the interface that all engine-specific connectors must imp
 The concrete subclasses (MSSQLConnector, PostgresConnector, MySQLConnector) override
 every @abstractmethod; two non-abstract helpers (get_row_count, delete_matching_rows)
 are provided here because their implementation is identical across all engines.
+
+This contract is intentionally small and row-dictionary based. Keep new shared
+features here only when they are portable across all supported engines; otherwise
+add the minimum engine-specific implementation in the concrete connector.
 """
 
 from __future__ import annotations
@@ -21,10 +25,10 @@ class BaseConnector(ABC):
     """Contract implemented by supported database connectors.
 
     Each engine subclass sets three class-level attributes that drive SQL generation:
-      engine      — canonical engine string ("mssql", "postgresql", "mysql")
-      quote_char  — identifier quote character for that engine
+      engine      - canonical engine string ("mssql", "postgresql", "mysql")
+      quote_char  - identifier quote character for that engine
                     '"' (PostgreSQL/MySQL double-quote), '`' (MySQL backtick), '[' (MSSQL)
-      placeholder — parameterised query placeholder: '?' (pyodbc) or '%s' (psycopg2/pymysql)
+      placeholder - parameterised query placeholder: '?' (pyodbc) or '%s' (psycopg2/pymysql)
     """
 
     engine: str
@@ -42,7 +46,7 @@ class BaseConnector(ABC):
     def connect(self) -> None:
         """Open an underlying DB connection.
 
-        Implementations must be idempotent — calling connect() when self.connection
+        Implementations must be idempotent: calling connect() when self.connection
         is already set should be a no-op, not raise or open a second connection.
         """
 
@@ -69,7 +73,7 @@ class BaseConnector(ABC):
         """Execute a query and return rows as dictionaries.
 
         DML statements (INSERT, DELETE, TRUNCATE) return an empty list and
-        auto-commit; SELECT statements return a list of column-name → value dicts.
+        auto-commit; SELECT statements return a list of column-name-to-value dicts.
         """
 
     @abstractmethod
@@ -126,11 +130,11 @@ class BaseConnector(ABC):
 
     @abstractmethod
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        """ALTER TABLE … ADD COLUMN for a missing target column."""
+        """ALTER TABLE ADD COLUMN for a missing target column."""
 
     @abstractmethod
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        """ALTER TABLE … DROP COLUMN for an extra target column."""
+        """ALTER TABLE DROP COLUMN for an extra target column."""
 
     @abstractmethod
     def truncate_table(self, schema: str | None, table: str) -> None:
@@ -169,7 +173,7 @@ class BaseConnector(ABC):
     ) -> int:
         """Delete target rows matching incoming primary-key values.
 
-        Builds a single DELETE … WHERE (pk1=? AND pk2=?) OR (…) statement.
+        Builds a single DELETE WHERE (pk1=? AND pk2=?) OR (...) statement.
         One parameterised predicate is emitted per source row, so the parameter
         list and OR-clause length both scale linearly with batch_size.  For very
         large batches (> ~10 000 rows) this can hit driver parameter limits on

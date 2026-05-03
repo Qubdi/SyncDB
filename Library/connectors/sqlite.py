@@ -3,6 +3,10 @@
 Uses Python's stdlib sqlite3 module, so it adds local-file database support
 without any optional dependency.  SQLite has no schema namespace; schema arguments
 are accepted for API compatibility and ignored by table metadata queries.
+
+SQLite support is useful for tests, demos, and lightweight local sync jobs. Keep
+behavior compatible with the shared connector contract even when SQLite accepts
+more flexible SQL than the server databases.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ class SQLiteConnector(BaseConnector):
     placeholder = "?"
 
     def connect(self) -> None:
+        """Open an idempotent sqlite3 connection and configure row dictionaries."""
         if self.connection is not None:
             return
         database = self._database_path()
@@ -103,6 +108,7 @@ class SQLiteConnector(BaseConnector):
         return bool(rows)
 
     def create_schema(self, schema: str | None) -> None:
+        """No-op: SQLite does not support server-side schemas."""
         return
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
@@ -133,6 +139,7 @@ class SQLiteConnector(BaseConnector):
         return [row["table_name"] for row in rows]
 
     def quote_table(self, schema: str | None, table: str) -> str:
+        """Ignore schema for SQLite while preserving the shared connector API."""
         return quote_identifier(table, self.quote_char)
 
     def _column_definition(self, column: Column) -> str:
@@ -140,6 +147,7 @@ class SQLiteConnector(BaseConnector):
         return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"
 
     def _database_path(self) -> str:
+        """Resolve sqlite:// URLs, filesystem paths, and in-memory databases."""
         if self.config.connection_string:
             parsed = urlparse(self.config.connection_string)
             if parsed.scheme not in {"sqlite", "sqlite3"}:

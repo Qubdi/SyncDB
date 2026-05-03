@@ -1,5 +1,9 @@
 """Small SQL-building helpers shared by connectors and pipelines.
 
+This is the defensive boundary for SQL text generated from user input. Keep all
+identifier validation and raw-filter checks here so connector implementations
+can build SQL consistently and reviewers have one place to audit injection risk.
+
 Security model
 --------------
 Identifiers (table names, column names, schema names) are validated against a
@@ -17,7 +21,7 @@ from typing import Any
 
 # Restricts identifiers to safe ASCII letters, digits, and underscores.
 # Quoted identifiers that could contain spaces or special chars are not supported
-# by design — the added complexity isn't worth the risk.
+# by design; the added complexity isn't worth the risk.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Token-based deny-list for raw WHERE clause strings.

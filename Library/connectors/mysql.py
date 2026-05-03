@@ -8,9 +8,13 @@ Driver selection is automatic: mysql.connector is tried first; if not installed,
 pymysql is tried next.  Both use the same %s placeholder style.
 
 The two drivers disagree on one keyword argument name:
-  mysql-connector-python  → connection_timeout
-  pymysql                 → connect_timeout
+  mysql-connector-python  -> connection_timeout
+  pymysql                 -> connect_timeout
 The connect() method normalises this difference after driver selection.
+
+MySQL treats databases as schemas. Whenever this connector receives a schema
+argument from the shared API, interpret it as the database name for metadata and
+DDL queries.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ class MySQLConnector(BaseConnector):
     placeholder = "%s"
 
     def connect(self) -> None:
+        """Open an idempotent MySQL connection using the first available driver."""
         if self.connection is not None:
             return
         try:
@@ -52,6 +57,7 @@ class MySQLConnector(BaseConnector):
         self.connection = mysql_connector.connect(**kwargs)
 
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        """Execute SQL and return rows as dictionaries using driver-neutral cursors."""
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query, tuple(params or []))
@@ -165,7 +171,7 @@ class MySQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        # MySQL requires the "COLUMN" keyword in ALTER TABLE … ADD COLUMN.
+        # MySQL requires the "COLUMN" keyword in ALTER TABLE ADD COLUMN.
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:

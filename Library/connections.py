@@ -1,7 +1,9 @@
 """Connector factory.
 
-Centralises the engine → connector class mapping so that SyncDB and any future
+Centralises the engine-to-connector class mapping so that SyncDB and any future
 callers don't need to import every connector directly or replicate the switch logic.
+When a new engine is added, update this file and the public connector exports
+together; otherwise DatabaseConfig may accept an engine that cannot be instantiated.
 """
 
 from __future__ import annotations

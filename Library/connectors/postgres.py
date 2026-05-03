@@ -3,6 +3,10 @@
 Uses psycopg2 as the DB-API driver.  psycopg2 is not a hard install-time dependency;
 the ImportError is raised lazily on the first connect() call so that users who only
 work with MSSQL or MySQL don't need libpq or the psycopg2 binary installed.
+
+PostgreSQL is the most standards-compliant connector in this package. Use it as
+the reference point for portable behavior, but keep PostgreSQL-only SQL here so
+other engines are not forced to emulate it.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ class PostgresConnector(BaseConnector):
     placeholder = "%s"
 
     def connect(self) -> None:
+        """Open an idempotent psycopg2 connection."""
         if self.connection is not None:
             return
         try:
@@ -36,7 +41,7 @@ class PostgresConnector(BaseConnector):
             self.connection = psycopg2.connect(self.config.connection_string, connect_timeout=self.config.connect_timeout)
         else:
             kwargs = self.config.as_connection_kwargs()
-            # psycopg2 uses "dbname", not "database" — rename before passing.
+            # psycopg2 uses "dbname", not "database"; rename before passing.
             kwargs["dbname"] = kwargs.pop("database")
             self.connection = psycopg2.connect(**kwargs)
 

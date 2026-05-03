@@ -1,10 +1,14 @@
 """Progress reporting for interactive terminals and log-like environments.
 
+This module deliberately stays dependency-free and writes plain ASCII progress
+bars. Progress output is part of operator experience, but it must also be safe
+for CI logs, Windows terminals, and redirected files.
+
 Three modes are supported:
-  ONE_LINE   — overwrites the same terminal line using a carriage return (\r).
+  ONE_LINE   - overwrites the same terminal line using a carriage return (\r).
                Ideal for interactive terminals; ugly in CI logs.
-  MULTI_LINE — emits a new line per batch update.  Safe for log aggregators.
-  NONE       — silent; no output at all.
+  MULTI_LINE - emits a new line per batch update. Safe for log aggregators.
+  NONE       - silent; no output at all.
 """
 
 from __future__ import annotations
@@ -24,6 +28,12 @@ class ProgressMode(str, Enum):
 
 
 class ProgressReporter:
+    """Small progress writer used by SyncDB batch operations.
+
+    The reporter intentionally has no timing logic or external dependencies.
+    Callers own when updates happen; this class only formats and flushes them.
+    """
+
     def __init__(
         self,
         mode: ProgressMode | str = ProgressMode.MULTI_LINE,
@@ -68,7 +78,7 @@ class ProgressReporter:
         """Build the progress string.
 
         Falls back to a plain "N rows" message when total is unknown (e.g. when
-        the connector lacks SELECT COUNT(*) permission — see SyncDB._safe_source_count).
+        the connector lacks SELECT COUNT(*) permission; see SyncDB._safe_source_count).
         """
         if not total or total <= 0:
             return f"{label} {current} rows"

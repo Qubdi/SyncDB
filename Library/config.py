@@ -1,4 +1,11 @@
-"""Configuration objects used by SyncDB."""
+"""Configuration objects used by SyncDB.
+
+This module owns normalization and validation for database endpoint settings.
+Keep those rules here so connectors can assume they receive a canonical engine
+name, engine defaults, and either a connection string or enough discrete fields
+to open a connection. That keeps connector code focused on driver behavior
+instead of duplicating user-input validation.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +43,7 @@ _DEFAULT_PORTS = {
     Engine.SQLITE: None,
 }
 
-# MySQL has no server-level schema namespace — databases ARE schemas there, so
+# MySQL has no server-level schema namespace; databases ARE schemas there, so
 # there is no meaningful "default schema" to pre-fill (the database itself serves
 # that role and is already set in the database field).
 _DEFAULT_SCHEMAS = {
@@ -129,6 +136,7 @@ class DatabaseConfig:
 
     @property
     def normalized_engine(self) -> Engine:
+        """Return the enum form for code paths that need engine identity checks."""
         return normalize_engine(self.engine)
 
     def as_connection_kwargs(self) -> dict[str, Any]:
