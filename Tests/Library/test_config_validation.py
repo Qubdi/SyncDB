@@ -17,19 +17,25 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(DatabaseConfig(engine="sql_server", connection_string="x").engine, "mssql")
         self.assertEqual(DatabaseConfig(engine="pg", connection_string="x").engine, "postgresql")
         self.assertEqual(DatabaseConfig(engine="mysql", connection_string="x").engine, "mysql")
+        self.assertEqual(DatabaseConfig(engine="sqlite3", database="local.db").engine, "sqlite")
 
     def test_default_ports_are_set_per_engine(self):
         self.assertEqual(DatabaseConfig(engine="mssql", connection_string="x").port, 1433)
         self.assertEqual(DatabaseConfig(engine="postgresql", connection_string="x").port, 5432)
         self.assertEqual(DatabaseConfig(engine="mysql", connection_string="x").port, 3306)
+        self.assertIsNone(DatabaseConfig(engine="sqlite", database="local.db").port)
 
     def test_requires_connection_details(self):
         with self.assertRaises(ValueError):
             DatabaseConfig(engine="mysql", host="localhost", database="syncdb")
 
+    def test_sqlite_requires_database_or_connection_string(self):
+        with self.assertRaises(ValueError):
+            DatabaseConfig(engine="sqlite")
+
     def test_rejects_unknown_engine(self):
         with self.assertRaises(ValueError):
-            DatabaseConfig(engine="sqlite", connection_string="sqlite://")
+            DatabaseConfig(engine="oracle", connection_string="oracle://")
 
     def test_rejects_invalid_pool_range(self):
         with self.assertRaises(ValueError):

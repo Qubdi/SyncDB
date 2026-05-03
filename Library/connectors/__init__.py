@@ -9,5 +9,6 @@ from .base import BaseConnector
 from .mssql import MSSQLConnector
 from .mysql import MySQLConnector
 from .postgres import PostgresConnector
+from .sqlite import SQLiteConnector
 
-__all__ = ["BaseConnector", "MSSQLConnector", "MySQLConnector", "PostgresConnector"]
+__all__ = ["BaseConnector", "MSSQLConnector", "MySQLConnector", "PostgresConnector", "SQLiteConnector"]

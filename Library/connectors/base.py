@@ -136,6 +136,24 @@ class BaseConnector(ABC):
     def truncate_table(self, schema: str | None, table: str) -> None:
         """Remove all rows from a table without logging individual deletes."""
 
+    def list_tables(self, schema: str | None = None) -> list[str]:
+        """Return base-table names in a schema for schema-level sync.
+
+        The information_schema query works for MSSQL, PostgreSQL, and MySQL.
+        SQLite overrides this because it stores table metadata in sqlite_master.
+        """
+        schema_name = schema or self.config.default_schema or self.config.database
+        rows = self.execute_query(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = {placeholder} AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """.format(placeholder=self.placeholder),
+            [schema_name],
+        )
+        return [row.get("table_name") or row.get("TABLE_NAME") for row in rows]
+
     def get_row_count(self, schema: str | None, table: str, where: str = "", params: Sequence[Any] | None = None) -> int:
         """Return SELECT COUNT(*) for the table, optionally filtered by a WHERE clause."""
         name = self.quote_table(schema, table)
@@ -174,3 +192,54 @@ class BaseConnector(ABC):
         query = f"DELETE FROM {self.quote_table(schema, table)} WHERE " + " OR ".join(predicates)
         self.execute_query(query, params)
         return len(rows)
+
+    def update_matching_rows(
+        self,
+        schema: str | None,
+        table: str,
+        rows: Sequence[dict[str, Any]],
+        primary_key: Sequence[str],
+        values: dict[str, Any],
+    ) -> int:
+        """Update rows matching primary-key values with fixed column values."""
+        if not rows or not primary_key or not values:
+            return 0
+        assignments = ", ".join(
+            f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
+            for column in values
+        )
+        predicates = []
+        params: list[Any] = []
+        for row in rows:
+            predicates.append(
+                "("
+                + " AND ".join(
+                    f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
+                    for column in primary_key
+                )
+                + ")"
+            )
+            params.extend(row[column] for column in primary_key)
+        query = f"UPDATE {self.quote_table(schema, table)} SET {assignments} WHERE " + " OR ".join(predicates)
+        self.execute_query(query, list(values.values()) + params)
+        return len(rows)
+
+    def copy_table_rows(
+        self,
+        source_schema: str | None,
+        source_table: str,
+        target_schema: str | None,
+        target_table: str,
+        columns: Sequence[str],
+    ) -> int:
+        """Copy all rows from one table to another table in the same database."""
+        column_sql = ", ".join(quote_identifier(column, self.quote_char) for column in columns)
+        self.execute_query(
+            f"INSERT INTO {self.quote_table(target_schema, target_table)} ({column_sql}) "
+            f"SELECT {column_sql} FROM {self.quote_table(source_schema, source_table)}"
+        )
+        return self.get_row_count(source_schema, source_table)
+
+    def drop_table(self, schema: str | None, table: str) -> None:
+        """Drop a table if it exists."""
+        self.execute_query(f"DROP TABLE IF EXISTS {self.quote_table(schema, table)}")

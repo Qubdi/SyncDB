@@ -32,7 +32,7 @@ class Column:
 
 
 class SchemaMapper:
-    """Map column types between MSSQL, PostgreSQL, and MySQL.
+    """Map column types between MSSQL, PostgreSQL, MySQL, and SQLite.
 
     All _to_* methods accept the normalised lowercase source engine string so the
     unsigned flag can adjust the output for MySQL-specific range semantics (e.g.
@@ -94,6 +94,8 @@ class SchemaMapper:
             return self._to_mssql(source, base, char_length, numeric_precision, numeric_scale, unsigned)
         if target == "mysql":
             return self._to_mysql(source, base, char_length, numeric_precision, numeric_scale, unsigned)
+        if target == "sqlite":
+            return self._to_sqlite(base)
         # Safety fallback; should not be reachable given normalize_engine validation.
         return "text"
 
@@ -270,6 +272,20 @@ class SchemaMapper:
         if data_type in {"bytea", "binary", "varbinary", "image", "blob", "rowversion"}:
             return "longblob"
         return "longtext"
+
+    def _to_sqlite(self, data_type: str) -> str:
+        """Map source types to SQLite affinity names.
+
+        SQLite accepts arbitrary type strings, but using the five standard
+        affinities keeps generated DDL predictable and easy to inspect.
+        """
+        if data_type in {"bigint", "bigserial", "int", "integer", "mediumint", "serial", "smallint", "tinyint", "bit", "boolean", "bool"}:
+            return "integer"
+        if data_type in {"decimal", "numeric", "money", "smallmoney", "float", "double", "double precision", "real"}:
+            return "real"
+        if data_type in {"binary", "varbinary", "image", "bytea", "blob", "longblob", "mediumblob", "tinyblob", "rowversion"}:
+            return "blob"
+        return "text"
 
     def _numeric(self, name: str, precision: int | None, scale: int | None) -> str:
         """Return "name(p,s)" when both modifiers are known, or bare "name" otherwise."""

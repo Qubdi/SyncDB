@@ -11,6 +11,7 @@ class Engine(str, Enum):
     MSSQL = "mssql"
     POSTGRESQL = "postgresql"
     MYSQL = "mysql"
+    SQLITE = "sqlite"
 
 
 # Accepts common informal spellings so callers don't need to know the canonical value.
@@ -23,6 +24,8 @@ _ENGINE_ALIASES = {
     "postgresql": Engine.POSTGRESQL,
     "pg": Engine.POSTGRESQL,
     "mysql": Engine.MYSQL,
+    "sqlite": Engine.SQLITE,
+    "sqlite3": Engine.SQLITE,
 }
 
 # Well-known default TCP ports; applied when the caller omits port entirely.
@@ -30,6 +33,7 @@ _DEFAULT_PORTS = {
     Engine.MSSQL: 1433,
     Engine.POSTGRESQL: 5432,
     Engine.MYSQL: 3306,
+    Engine.SQLITE: None,
 }
 
 # MySQL has no server-level schema namespace — databases ARE schemas there, so
@@ -39,6 +43,7 @@ _DEFAULT_SCHEMAS = {
     Engine.MSSQL: "dbo",
     Engine.POSTGRESQL: "public",
     Engine.MYSQL: None,
+    Engine.SQLITE: None,
 }
 
 
@@ -100,6 +105,11 @@ class DatabaseConfig:
         # A raw connection_string is accepted as-is; individual credential fields
         # are only required when no connection_string was provided.
         if self.connection_string:
+            return
+
+        if normalized == Engine.SQLITE:
+            if not self.database:
+                raise ValueError("connection_string or database path is required for SQLite")
             return
 
         missing = [

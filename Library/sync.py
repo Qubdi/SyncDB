@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import fnmatch
+import json
 import sys
+import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, TextIO
@@ -14,7 +18,7 @@ from .connections import create_connector
 from .connectors.base import BaseConnector
 from .files import FileTransfer
 from .progress import ProgressMode, ProgressReporter
-from .sql import build_order_by, build_where_clause, parse_qualified_name
+from .sql import build_order_by, build_where_clause, parse_qualified_name, quote_identifier, validate_identifier
 from .type_mapping import Column, SchemaMapper
 
 
@@ -25,9 +29,15 @@ class TransferMode(str, Enum):
     # Pure append: insert every source row as-is and never delete/update existing
     # target rows.  Useful for immutable event streams, audit logs, and history tables.
     INSERT_ONLY = "insert_only"
-    # Intended for a future implementation that bulk-loads into a staging table
-    # and then swaps atomically.  Currently behaves identically to APPEND because
-    # true staging requires connector-level support (temp table creation, swap DDL).
+    # Explicit upsert mode.  Today it uses the same portable delete+insert strategy
+    # as APPEND; connector-native MERGE/ON CONFLICT optimisations can replace this later.
+    UPSERT = "upsert"
+    # Append every source row with a _synced_at timestamp for historical snapshots.
+    SNAPSHOT = "snapshot"
+    # Upsert active source rows, then mark target rows missing from the source with deleted_at.
+    SOFT_DELETE = "soft_delete"
+    # Portable staging load: write all source rows to a staging table first, then
+    # replace the live target contents from staging in a final step.
     APPEND_STAGING = "append_staging"
     # Truncate the target before loading.  Suitable for full daily refreshes.
     FULL_REFRESH = "full_refresh"
@@ -46,11 +56,14 @@ class TableSyncResult:
     mode: str
     rows_read: int = 0
     rows_written: int = 0
+    rows_soft_deleted: int = 0
     batches: int = 0
     schema_created: bool = False
     table_created: bool = False
     columns_added: list[str] = field(default_factory=list)
     columns_dropped: list[str] = field(default_factory=list)
+    expectations_failed: list[str] = field(default_factory=list)
+    watermark_value: Any = None
     dry_run: bool = False
 
 
@@ -82,9 +95,15 @@ class SyncDB:
         file_transfer: FileTransfer | None = None,
         verbose: str | None = None,
         verbose_stream: TextIO | None = None,
+        retry_count: int = 0,
+        retry_delay_seconds: float = 1.0,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than zero")
+        if retry_count < 0:
+            raise ValueError("retry_count must be zero or greater")
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must be zero or greater")
         # source_connector/target_connector take precedence over source/target when both
         # are supplied, allowing callers to inject test doubles without refactoring.
         self.source = source_connector or self._coerce_connector(source)
@@ -102,6 +121,8 @@ class SyncDB:
         # is a final audit view over TableSyncResult objects.
         self.verbose = self._normalize_verbose(verbose)
         self.verbose_stream = verbose_stream or sys.stdout
+        self.retry_count = retry_count
+        self.retry_delay_seconds = retry_delay_seconds
 
     def sync_tables(self, tables: dict[str, dict[str, Any]]) -> list[TableSyncResult]:
         """Synchronize one or more database tables from source to target.
@@ -128,6 +149,87 @@ class SyncDB:
             self.target.close()
         self._emit_summary(results)
         return results
+
+    def sync_schema(
+        self,
+        source_schema: str | None,
+        destination_schema: str | None,
+        exclude: Sequence[str] | None = None,
+        mode: str = TransferMode.APPEND.value,
+        **table_defaults: Any,
+    ) -> list[TableSyncResult]:
+        """Synchronize every table in a source schema.
+
+        Exclusion patterns use fnmatch syntax, so callers can skip tables with
+        values like ["tmp_*", "audit_log"].  table_defaults are copied into every
+        generated table spec, letting callers set mode, batch options, or expect
+        rules once for the whole schema.
+        """
+        if self.source is None:
+            raise ValueError("source connector/config is required for schema sync")
+        self.source.connect()
+        try:
+            names = self.source.list_tables(source_schema)
+        finally:
+            self.source.close()
+        patterns = list(exclude or [])
+        tables = {
+            name: {
+                **table_defaults,
+                "source": f"{source_schema}.{name}" if source_schema else name,
+                "destination": f"{destination_schema}.{name}" if destination_schema else name,
+                "mode": mode,
+            }
+            for name in names
+            if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+        }
+        return self.sync_tables(tables)
+
+    @classmethod
+    def from_job_config(cls, config: dict[str, Any]) -> "SyncDB":
+        """Build a SyncDB instance from a parsed YAML/JSON job config."""
+        settings = dict(config.get("settings") or {})
+        source = DatabaseConfig(**config["source"]) if config.get("source") else None
+        target = DatabaseConfig(**config["target"]) if config.get("target") else None
+        allowed_settings = {
+            "batch_size",
+            "progress_mode",
+            "dry_run",
+            "drop_extra_columns",
+            "verbose",
+            "retry_count",
+            "retry_delay_seconds",
+        }
+        kwargs = {key: value for key, value in settings.items() if key in allowed_settings}
+        return cls(source=source, target=target, **kwargs)
+
+    @classmethod
+    def run_config_file(cls, path: str | Path) -> list[TableSyncResult]:
+        """Load a YAML/JSON config file and run its table sync job."""
+        config_path = Path(path)
+        config = cls._load_job_config(config_path)
+        sync = cls.from_job_config(config)
+        return sync.sync_tables(config.get("tables") or {})
+
+    @staticmethod
+    def _load_job_config(path: Path) -> dict[str, Any]:
+        """Parse a JSON or YAML job file.
+
+        YAML support is optional; JSON works with the standard library.  Raising a
+        clear ImportError keeps scheduled jobs from failing later with an obscure
+        missing-module traceback.
+        """
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".json":
+            return json.loads(text)
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            try:
+                import yaml
+            except ImportError as exc:
+                raise ImportError("PyYAML is required to read YAML job configs; use JSON or install pyyaml") from exc
+            data = yaml.safe_load(text)
+            return data if isinstance(data, dict) else {}
+        raise ValueError("Job config file must end with .json, .yaml, or .yml")
 
     def export_query_to_file(
         self,
@@ -189,6 +291,7 @@ class SyncDB:
         mode = TransferMode(spec.get("mode", TransferMode.APPEND.value))
         source_name = parse_qualified_name(spec["source"], self.source.config.default_schema)
         target_name = parse_qualified_name(spec["destination"], self.target.config.default_schema)
+        rename_map = self._normalize_rename_map(spec.get("rename"))
         result = TableSyncResult(
             name=name,
             source=spec["source"],
@@ -201,46 +304,94 @@ class SyncDB:
         # would be created/altered; actual DDL is gated inside _sync_schema.
         source_columns = self.source.get_columns(source_name.schema, source_name.table)
         target_columns = self.schema_mapper.map_columns(source_columns, self.source.engine, self.target.engine)
+        target_columns = self._apply_column_options(target_columns, rename_map, spec.get("type_overrides"))
+        if mode == TransferMode.SNAPSHOT:
+            target_columns = self._ensure_system_column(target_columns, "_synced_at", self._timestamp_type())
+        if mode == TransferMode.SOFT_DELETE:
+            target_columns = self._ensure_system_column(target_columns, "deleted_at", self._timestamp_type())
         self._sync_schema(target_name.schema, target_name.table, target_columns, result)
 
         if self.dry_run:
             return result
 
-        if mode == TransferMode.FULL_REFRESH:
+        write_schema, write_table = target_name.schema, target_name.table
+        staging_table = f"__syncdb_{target_name.table}_staging" if mode == TransferMode.APPEND_STAGING else None
+        if staging_table:
+            # The generic staging path keeps the live table untouched while rows are
+            # loaded, then does a final truncate/copy.  It is portable across engines;
+            # a future connector-native implementation can upgrade this to true
+            # transactional rename/swap where the engine supports it.
+            self.target.drop_table(target_name.schema, staging_table)
+            self.target.create_table(target_name.schema, staging_table, target_columns)
+            write_table = staging_table
+        elif mode == TransferMode.FULL_REFRESH:
             self.target.truncate_table(target_name.schema, target_name.table)
 
         filter_sql, params = build_where_clause(spec.get("filter"))
+        watermark_cfg = self._load_watermark(spec)
+        if watermark_cfg:
+            filter_sql, params = self._apply_watermark_filter(filter_sql, params, watermark_cfg["column"], watermark_cfg["value"])
         order_sql = build_order_by(spec.get("order_by"), self.source.quote_char)
         total = self._safe_source_count(source_name.schema, source_name.table, filter_sql, params)
         column_names = [column.name for column in source_columns]
+        target_column_names = [column.name for column in target_columns]
         # Prefer an explicit primary_key list from the spec; fall back to columns
         # flagged is_primary_key by the source connector's metadata query.
-        primary_key = list(spec.get("primary_key") or [column.name for column in source_columns if column.is_primary_key])
+        source_primary_key = list(spec.get("primary_key") or [column.name for column in source_columns if column.is_primary_key])
+        target_primary_key = [rename_map.get(column, column) for column in source_primary_key]
+        transform = spec.get("transform")
+        on_batch = spec.get("on_batch")
+        snapshot_ts = datetime.now(timezone.utc).isoformat() if mode == TransferMode.SNAPSHOT else None
+        seen_keys: set[tuple[Any, ...]] = set()
 
-        # NOTE: append_staging is not yet distinguished from append at the
-        # pipeline level. True staging (bulk-load to a temp table, swap once)
-        # requires connector-level support and will be added later.
-        for batch in self.source.fetch_batches(
-            source_name.schema,
-            source_name.table,
-            columns=column_names,
-            where=filter_sql,
-            params=params,
-            order_by=order_sql,
-            batch_size=self.batch_size,
-        ):
-            # For APPEND modes: delete existing rows that match this batch on PK
-            # before re-inserting so updated source rows replace stale target rows.
-            # INSERT_ONLY deliberately skips this even when a PK is supplied, because
-            # duplicate keys may be valid facts in append-only audit/event tables.
-            # FULL_REFRESH skips this because the table was already truncated above.
-            if mode in {TransferMode.APPEND, TransferMode.APPEND_STAGING} and primary_key:
-                self.target.delete_matching_rows(target_name.schema, target_name.table, batch, primary_key)
-            written = self.target.insert_batch(target_name.schema, target_name.table, batch, column_names)
-            result.batches += 1
-            result.rows_read += len(batch)
-            result.rows_written += written
-            self.progress.update(result.destination, result.rows_written, total)
+        try:
+            for raw_batch in self.source.fetch_batches(
+                source_name.schema,
+                source_name.table,
+                columns=column_names,
+                where=filter_sql,
+                params=params,
+                order_by=order_sql,
+                batch_size=self.batch_size,
+            ):
+                if watermark_cfg:
+                    result.watermark_value = self._max_value(result.watermark_value, raw_batch, watermark_cfg["column"])
+                batch = self._prepare_batch(raw_batch, rename_map, transform, target_column_names, mode, snapshot_ts)
+                if not batch:
+                    continue
+                if target_primary_key:
+                    seen_keys.update(tuple(row[column] for column in target_primary_key) for row in batch)
+
+                def write_batch() -> int:
+                    # APPEND/UPSERT/SOFT_DELETE replace rows that match on PK. INSERT_ONLY
+                    # and SNAPSHOT deliberately preserve existing target rows.
+                    if mode in {TransferMode.APPEND, TransferMode.UPSERT, TransferMode.SOFT_DELETE} and target_primary_key:
+                        self.target.delete_matching_rows(write_schema, write_table, batch, target_primary_key)
+                    return self.target.insert_batch(write_schema, write_table, batch, target_column_names)
+
+                written = self._with_retries(write_batch)
+                result.batches += 1
+                result.rows_read += len(raw_batch)
+                result.rows_written += written
+                self.progress.update(result.destination, result.rows_written, total)
+                if on_batch:
+                    on_batch(result)
+
+            if staging_table:
+                self._replace_from_staging(target_name.schema, target_name.table, staging_table, target_column_names)
+            if mode == TransferMode.SOFT_DELETE and target_primary_key:
+                result.rows_soft_deleted = self._apply_soft_deletes(
+                    target_name.schema,
+                    target_name.table,
+                    target_primary_key,
+                    seen_keys,
+                )
+            if watermark_cfg and result.watermark_value is not None:
+                self._save_watermark(watermark_cfg, result.watermark_value)
+            self._validate_expectations(target_name.schema, target_name.table, spec.get("expect"), result)
+        finally:
+            if staging_table:
+                self.target.drop_table(target_name.schema, staging_table)
 
         return result
 
@@ -284,6 +435,217 @@ class SyncDB:
                     result.columns_dropped.append(column.name)
                     if not self.dry_run:
                         self.target.drop_column(schema, table, column.name)
+
+    def _normalize_rename_map(self, rename: dict[str, str] | None) -> dict[str, str]:
+        """Validate source-to-target column rename configuration."""
+        mapping = dict(rename or {})
+        for source, target in mapping.items():
+            validate_identifier(source)
+            validate_identifier(target)
+        return mapping
+
+    def _apply_column_options(
+        self,
+        columns: list[Column],
+        rename_map: dict[str, str],
+        type_overrides: dict[str, str] | None,
+    ) -> list[Column]:
+        """Apply per-table rename and target-type override options to mapped columns."""
+        overrides = dict(type_overrides or {})
+        for name in overrides:
+            validate_identifier(name)
+        result: list[Column] = []
+        for column in columns:
+            target_name = rename_map.get(column.name, column.name)
+            data_type = overrides.get(target_name, column.data_type)
+            result.append(replace(column, name=target_name, data_type=data_type))
+        return result
+
+    def _ensure_system_column(self, columns: list[Column], name: str, data_type: str) -> list[Column]:
+        """Append a SyncDB-managed metadata column when it is not already present."""
+        if any(column.name.lower() == name.lower() for column in columns):
+            return columns
+        return [*columns, Column(name=name, data_type=data_type, nullable=True)]
+
+    def _timestamp_type(self) -> str:
+        if self.target.engine == "mssql":
+            return "datetime2"
+        if self.target.engine == "sqlite":
+            return "text"
+        return "timestamp"
+
+    def _prepare_batch(
+        self,
+        raw_batch: list[dict[str, Any]],
+        rename_map: dict[str, str],
+        transform: Any,
+        target_columns: Sequence[str],
+        mode: TransferMode,
+        snapshot_ts: str | None,
+    ) -> list[dict[str, Any]]:
+        """Transform rows, apply target column names, and add system columns."""
+        rows = [dict(row) for row in raw_batch]
+        if transform:
+            transformed = transform(rows)
+            if transformed is not None:
+                rows = [dict(row) for row in transformed]
+        prepared: list[dict[str, Any]] = []
+        for row in rows:
+            mapped = {rename_map.get(column, column): value for column, value in row.items()}
+            if mode == TransferMode.SNAPSHOT:
+                mapped["_synced_at"] = snapshot_ts
+            if mode == TransferMode.SOFT_DELETE:
+                mapped["deleted_at"] = None
+            prepared.append({column: mapped.get(column) for column in target_columns})
+        return prepared
+
+    def _with_retries(self, operation):
+        """Run a database write operation with simple exponential backoff."""
+        attempt = 0
+        while True:
+            try:
+                return operation()
+            except Exception:
+                if attempt >= self.retry_count:
+                    raise
+                time.sleep(self.retry_delay_seconds * (2 ** attempt))
+                attempt += 1
+
+    def _replace_from_staging(
+        self,
+        schema: str | None,
+        table: str,
+        staging_table: str,
+        columns: Sequence[str],
+    ) -> None:
+        """Replace live rows from a staging table using portable SQL."""
+        def replace_rows() -> None:
+            self.target.truncate_table(schema, table)
+            self.target.copy_table_rows(schema, staging_table, schema, table, columns)
+
+        self._with_retries(replace_rows)
+
+    def _apply_soft_deletes(
+        self,
+        schema: str | None,
+        table: str,
+        primary_key: Sequence[str],
+        seen_keys: set[tuple[Any, ...]],
+    ) -> int:
+        """Mark target rows missing from the source as deleted."""
+        missing: list[dict[str, Any]] = []
+        for batch in self.target.fetch_batches(schema, table, columns=primary_key, batch_size=self.batch_size):
+            for row in batch:
+                key = tuple(row[column] for column in primary_key)
+                if key not in seen_keys:
+                    missing.append(row)
+        if not missing:
+            return 0
+        deleted_at = datetime.now(timezone.utc).isoformat()
+        return self._with_retries(lambda: self.target.update_matching_rows(schema, table, missing, primary_key, {"deleted_at": deleted_at}))
+
+    def _load_watermark(self, spec: dict[str, Any]) -> dict[str, Any] | None:
+        column = spec.get("incremental_column")
+        store = spec.get("watermark_store")
+        if not column:
+            return None
+        validate_identifier(column)
+        path = Path(store or ".syncdb_watermarks.json")
+        key = spec.get("watermark_key") or f"{spec['source']}->{spec['destination']}:{column}"
+        values = self._read_watermark_file(path)
+        return {"path": path, "key": key, "column": column, "value": values.get(key)}
+
+    def _read_watermark_file(self, path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+
+    def _save_watermark(self, config: dict[str, Any], value: Any) -> None:
+        path: Path = config["path"]
+        values = self._read_watermark_file(path)
+        values[config["key"]] = value.isoformat() if hasattr(value, "isoformat") else value
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(values, handle, indent=2, sort_keys=True)
+
+    def _apply_watermark_filter(
+        self,
+        where_sql: str,
+        params: list[Any],
+        column: str,
+        value: Any,
+    ) -> tuple[str, list[Any]]:
+        if value in {None, ""}:
+            return where_sql, params
+        condition = f"{quote_identifier(column, self.source.quote_char)} > {self.source.placeholder}"
+        if not where_sql:
+            return f" WHERE {condition} ", [*params, value]
+        existing = where_sql.strip()
+        if existing.upper().startswith("WHERE "):
+            existing = existing[6:].strip()
+        return f" WHERE ({existing}) AND ({condition}) ", [*params, value]
+
+    def _max_value(self, current: Any, rows: list[dict[str, Any]], column: str) -> Any:
+        values = [row.get(column) for row in rows if row.get(column) is not None]
+        if not values:
+            return current
+        batch_max = max(values)
+        if current is None or batch_max > current:
+            return batch_max
+        return current
+
+    def _validate_expectations(
+        self,
+        schema: str | None,
+        table: str,
+        expect: dict[str, Any] | None,
+        result: TableSyncResult,
+    ) -> None:
+        """Run optional data-quality checks after a table sync."""
+        if not expect:
+            return
+        rows = [row for batch in self.target.fetch_batches(schema, table, batch_size=self.batch_size) for row in batch]
+        failures: list[str] = []
+        min_rows = expect.get("min_rows")
+        if min_rows is not None and len(rows) < int(min_rows):
+            failures.append(f"expected at least {min_rows} rows, found {len(rows)}")
+        for column in expect.get("not_null", []) or []:
+            validate_identifier(column)
+            null_count = sum(1 for row in rows if row.get(column) is None)
+            if null_count:
+                failures.append(f"{column} has {null_count} null values")
+        for key in expect.get("unique", []) or []:
+            columns = [key] if isinstance(key, str) else list(key)
+            for column in columns:
+                validate_identifier(column)
+            seen = set()
+            duplicates = 0
+            for row in rows:
+                value = tuple(row.get(column) for column in columns)
+                if value in seen:
+                    duplicates += 1
+                seen.add(value)
+            if duplicates:
+                failures.append(f"{', '.join(columns)} has {duplicates} duplicate rows")
+        for column, bounds in (expect.get("range") or {}).items():
+            validate_identifier(column)
+            minimum = bounds.get("min")
+            maximum = bounds.get("max")
+            for row in rows:
+                value = row.get(column)
+                if value is None:
+                    continue
+                if minimum is not None and value < minimum:
+                    failures.append(f"{column} has value below {minimum}: {value}")
+                    break
+                if maximum is not None and value > maximum:
+                    failures.append(f"{column} has value above {maximum}: {value}")
+                    break
+        result.expectations_failed = failures
+        if failures:
+            raise ValueError(f"Data quality checks failed for {result.destination}: " + "; ".join(failures))
 
     def _safe_source_count(
         self,
@@ -381,11 +743,14 @@ class SyncDB:
                 "mode",
                 "read",
                 "written",
+                "soft deleted",
                 "batches",
                 "schema",
                 "table",
                 "added",
                 "dropped",
+                "checks",
+                "watermark",
                 "dry run",
             ]
             rows = [
@@ -396,11 +761,14 @@ class SyncDB:
                     result.mode,
                     f"{result.rows_read:,}",
                     f"{result.rows_written:,}",
+                    f"{result.rows_soft_deleted:,}",
                     str(result.batches),
                     "yes" if result.schema_created else "no",
                     "yes" if result.table_created else "no",
                     ", ".join(result.columns_added) or "-",
                     ", ".join(result.columns_dropped) or "-",
+                    "fail" if result.expectations_failed else "ok",
+                    str(result.watermark_value) if result.watermark_value is not None else "-",
                     "yes" if result.dry_run else "no",
                 ]
                 for result in results

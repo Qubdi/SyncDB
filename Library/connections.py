@@ -7,7 +7,7 @@ callers don't need to import every connector directly or replicate the switch lo
 from __future__ import annotations
 
 from .config import DatabaseConfig
-from .connectors import MSSQLConnector, MySQLConnector, PostgresConnector
+from .connectors import MSSQLConnector, MySQLConnector, PostgresConnector, SQLiteConnector
 from .connectors.base import BaseConnector
 
 
@@ -25,5 +25,7 @@ def create_connector(config: DatabaseConfig) -> BaseConnector:
         return PostgresConnector(config)
     if config.engine == "mysql":
         return MySQLConnector(config)
+    if config.engine == "sqlite":
+        return SQLiteConnector(config)
     # Should only be reachable if a new Engine value is added without updating this factory.
     raise ValueError(f"Unsupported database engine: {config.engine}")

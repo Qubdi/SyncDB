@@ -27,6 +27,9 @@ class MemoryConnector(BaseConnector):
                 return [dict(row) for row in rows]
         return []
 
+    def list_tables(self, schema=None):
+        return sorted(table for table_schema, table in self.columns_by_table if table_schema == schema)
+
     def fetch_batches(self, schema, table, columns=None, where="", params=None, order_by="", batch_size=5000):
         rows = self.rows_by_table.get((schema, table), [])
         for start in range(0, len(rows), batch_size):
@@ -80,6 +83,24 @@ class MemoryConnector(BaseConnector):
             row for row in current if tuple(row[column] for column in primary_key) not in keys
         ]
         return len(keys)
+
+    def update_matching_rows(self, schema, table, rows, primary_key, values):
+        keys = {tuple(row[column] for column in primary_key) for row in rows}
+        updated = 0
+        for row in self.rows_by_table.get((schema, table), []):
+            if tuple(row[column] for column in primary_key) in keys:
+                row.update(values)
+                updated += 1
+        return updated
+
+    def copy_table_rows(self, source_schema, source_table, target_schema, target_table, columns):
+        rows = [{column: row.get(column) for column in columns} for row in self.rows_by_table.get((source_schema, source_table), [])]
+        self.rows_by_table.setdefault((target_schema, target_table), []).extend(rows)
+        return len(rows)
+
+    def drop_table(self, schema, table):
+        self.rows_by_table.pop((schema, table), None)
+        self.columns_by_table.pop((schema, table), None)
 
 
 def _make_sync(source, target, **kwargs) -> "SyncDB":
@@ -204,6 +225,189 @@ class SyncDBTests(unittest.TestCase):
                 {"id": 2, "message": "new fact"},
             ],
         )
+
+    def test_upsert_mode_replaces_matching_primary_key_rows(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "orders"): [{"id": 1, "status": "new"}]},
+            columns_by_table={
+                ("dbo", "orders"): [
+                    Column("id", "int", nullable=False, is_primary_key=True),
+                    Column("status", "nvarchar", char_length=20),
+                ]
+            },
+        )
+        target = MemoryConnector(
+            "postgresql",
+            "public",
+            rows_by_table={("public", "orders"): [{"id": 1, "status": "old"}]},
+            columns_by_table={
+                ("public", "orders"): [
+                    Column("id", "integer", nullable=False, is_primary_key=True),
+                    Column("status", "varchar", char_length=20),
+                ]
+            },
+        )
+        sync = _make_sync(source, target)
+
+        result = sync.sync_tables(
+            {"orders": {"source": "dbo.orders", "destination": "public.orders", "mode": "upsert", "primary_key": ["id"]}}
+        )[0]
+
+        self.assertEqual(result.mode, "upsert")
+        self.assertEqual(target.rows_by_table[("public", "orders")], [{"id": 1, "status": "new"}])
+
+    def test_snapshot_adds_synced_at_and_preserves_existing_rows(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "orders"): [{"id": 1}]},
+            columns_by_table={("dbo", "orders"): [Column("id", "int", is_primary_key=True)]},
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = _make_sync(source, target)
+
+        result = sync.sync_tables({"orders": {"source": "dbo.orders", "destination": "public.orders", "mode": "snapshot"}})[0]
+
+        self.assertEqual(result.mode, "snapshot")
+        self.assertIn("_synced_at", target.rows_by_table[("public", "orders")][0])
+        self.assertIn("_synced_at", [column.name for column in target.columns_by_table[("public", "orders")]])
+
+    def test_transform_rename_and_type_overrides_are_applied(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "customers"): [{"cust_id": 1, "email": "a@example.com"}]},
+            columns_by_table={
+                ("dbo", "customers"): [
+                    Column("cust_id", "int", is_primary_key=True),
+                    Column("email", "nvarchar", char_length=200),
+                ]
+            },
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = _make_sync(source, target)
+
+        sync.sync_tables(
+            {
+                "customers": {
+                    "source": "dbo.customers",
+                    "destination": "public.customers",
+                    "rename": {"cust_id": "customer_id"},
+                    "type_overrides": {"email": "text"},
+                    "transform": lambda rows: [{**row, "email": "***@***.***"} for row in rows],
+                }
+            }
+        )
+
+        self.assertEqual(target.rows_by_table[("public", "customers")], [{"customer_id": 1, "email": "***@***.***"}])
+        columns = {column.name: column.data_type for column in target.columns_by_table[("public", "customers")]}
+        self.assertEqual(columns["email"], "text")
+
+    def test_soft_delete_marks_missing_target_rows(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "orders"): [{"id": 1}]},
+            columns_by_table={("dbo", "orders"): [Column("id", "int", is_primary_key=True)]},
+        )
+        target = MemoryConnector(
+            "postgresql",
+            "public",
+            rows_by_table={("public", "orders"): [{"id": 1, "deleted_at": "old"}, {"id": 2, "deleted_at": None}]},
+            columns_by_table={
+                ("public", "orders"): [
+                    Column("id", "integer", is_primary_key=True),
+                    Column("deleted_at", "timestamp"),
+                ]
+            },
+        )
+        sync = _make_sync(source, target)
+
+        result = sync.sync_tables(
+            {"orders": {"source": "dbo.orders", "destination": "public.orders", "mode": "soft_delete", "primary_key": ["id"]}}
+        )[0]
+
+        self.assertEqual(result.rows_soft_deleted, 1)
+        row_by_id = {row["id"]: row for row in target.rows_by_table[("public", "orders")]}
+        self.assertIsNone(row_by_id[1]["deleted_at"])
+        self.assertIsNotNone(row_by_id[2]["deleted_at"])
+
+    def test_append_staging_replaces_live_table_after_loading_stage(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "items"): [{"id": 2}]},
+            columns_by_table={("dbo", "items"): [Column("id", "int", is_primary_key=True)]},
+        )
+        target = MemoryConnector(
+            "postgresql",
+            "public",
+            rows_by_table={("public", "items"): [{"id": 1}]},
+            columns_by_table={("public", "items"): [Column("id", "integer", is_primary_key=True)]},
+        )
+        sync = _make_sync(source, target)
+
+        sync.sync_tables({"items": {"source": "dbo.items", "destination": "public.items", "mode": "append_staging"}})
+
+        self.assertEqual(target.rows_by_table[("public", "items")], [{"id": 2}])
+        self.assertNotIn(("public", "__syncdb_items_staging"), target.rows_by_table)
+
+    def test_expectations_fail_loudly(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "items"): [{"id": 1}, {"id": 1}]},
+            columns_by_table={("dbo", "items"): [Column("id", "int")]},
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = _make_sync(source, target)
+
+        with self.assertRaises(ValueError):
+            sync.sync_tables(
+                {
+                    "items": {
+                        "source": "dbo.items",
+                        "destination": "public.items",
+                        "expect": {"unique": ["id"], "min_rows": 3},
+                    }
+                }
+            )
+
+    def test_sync_schema_builds_table_specs_from_source_schema(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "customers"): [{"id": 1}], ("dbo", "tmp_skip"): [{"id": 2}]},
+            columns_by_table={
+                ("dbo", "customers"): [Column("id", "int", is_primary_key=True)],
+                ("dbo", "tmp_skip"): [Column("id", "int", is_primary_key=True)],
+            },
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = _make_sync(source, target)
+
+        results = sync.sync_schema("dbo", "public", exclude=["tmp_*"])
+
+        self.assertEqual([result.name for result in results], ["customers"])
+        self.assertIn(("public", "customers"), target.rows_by_table)
+
+    def test_from_job_config_builds_sync_instance(self):
+        sync = SyncDB.from_job_config(
+            {
+                "source": {"engine": "mssql", "connection_string": "Driver=..."},
+                "target": {"engine": "postgresql", "connection_string": "postgresql://example"},
+                "settings": {"batch_size": 123, "verbose": "standard", "retry_count": 2},
+                "tables": {"orders": {"source": "dbo.orders", "destination": "public.orders"}},
+            }
+        )
+
+        self.assertEqual(sync.batch_size, 123)
+        self.assertEqual(sync.verbose, "standard")
+        self.assertEqual(sync.retry_count, 2)
+        self.assertEqual(sync.source.config.engine, "mssql")
+        self.assertEqual(sync.target.config.engine, "postgresql")
 
     def test_verbose_standard_prints_summary_after_sync(self):
         import io
