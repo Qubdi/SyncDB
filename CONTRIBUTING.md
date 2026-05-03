@@ -25,18 +25,24 @@ SyncDB/
 │   │   └── mysql.py           # mysql-connector-python / pymysql connector
 │   └── pipelines/             # Thin re-export aliases (reserved for future expansion)
 ├── Tests/
-│   ├── Library/               # Unit tests (no DB required)
-│   │   ├── test_config_validation.py
-│   │   ├── test_type_mapping.py
-│   │   ├── test_query_builders.py
-│   │   ├── test_progress.py
-│   │   ├── test_sync.py       # Uses MemoryConnector — no real DB needed
-│   │   └── test_file_transfer.py
+│   ├── Library/               # Unit tests (no DB required), grouped by module
+│   │   ├── config/            # DatabaseConfig validation
+│   │   ├── connectors/        # Connector-level tests (SQLite, etc.)
+│   │   ├── files/             # FileTransfer read/write tests
+│   │   ├── progress/          # ProgressReporter tests
+│   │   ├── sql/               # SQL builder and identifier tests
+│   │   ├── sync/              # SyncDB orchestrator tests
+│   │   │   ├── helpers.py     # MemoryConnector + make_sync (shared fixtures)
+│   │   │   ├── test_sync_modes.py     # append, full_refresh, upsert, snapshot, …
+│   │   │   ├── test_sync_features.py  # transforms, dry_run, expectations, …
+│   │   │   └── test_sync_io.py        # verbose output, file export/import
+│   │   └── type_mapping/      # SchemaMapper cross-engine type tests
 │   └── DataBase/              # Docker integration environment
 │       ├── docker-compose.yml
 │       ├── seed/              # SQL seed scripts for MSSQL, PostgreSQL, MySQL
 │       └── images/            # Custom Dockerfiles + data-check validator
 ├── Current/                   # Legacy scripts (pre-refactor, kept for reference)
+├── run_tests.ps1              # Manual test runner (PowerShell)
 ├── pyproject.toml             # Package metadata and setuptools config
 ├── requirements.txt           # Full dev dependency set
 ├── README.md                  # User-facing documentation
@@ -62,11 +68,18 @@ source .venv/bin/activate
 # 3. Install the package in editable mode with all dev dependencies
 pip install -e .
 pip install -r requirements.txt
+
+# 4. Enable the pre-push git hook (runs tests before every push)
+git config core.hooksPath .githooks
 ```
 
 The `pip install -e .` step is required. It maps the `Library/` directory to the
 `syncdb` package name via the `[tool.setuptools.package-dir]` config in
 `pyproject.toml`. Without it, `import syncdb` will fail.
+
+Step 4 activates the pre-push hook stored in `.githooks/pre-push`. It runs the
+full test suite before every `git push` and blocks the push if any test fails.
+Use `git push --no-verify` to skip it when you have a good reason.
 
 ---
 
@@ -74,9 +87,28 @@ The `pip install -e .` step is required. It maps the `Library/` directory to the
 
 ### Unit tests (no database required)
 
+Run everything:
+
 ```bash
 pytest
 ```
+
+Run a specific suite (faster feedback while working on one module):
+
+```powershell
+# PowerShell
+.\run_tests.ps1 sync          # only the sync/ suite
+.\run_tests.ps1 config -v     # with verbose output
+
+# or call pytest directly
+pytest Tests/Library/sync
+pytest Tests/Library/sync -v -k "upsert"   # filter by test name
+```
+
+Available suites: `config`, `connectors`, `files`, `progress`, `sql`, `sync`, `type_mapping`
+
+The pre-push hook runs `pytest` automatically before every `git push`. To skip
+it in an emergency: `git push --no-verify`
 
 ### Integration tests (requires Docker)
 

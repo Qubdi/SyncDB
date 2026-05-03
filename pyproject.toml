@@ -44,4 +44,12 @@ find = { where = ["."], include = ["Library*"] }
 "syncdb.pipelines"  = "Library/pipelines"
 
 [tool.pytest.ini_options]
-testpaths = ["Tests/Library"]
+testpaths = [
+    "Tests/Library/config",
+    "Tests/Library/connectors",
+    "Tests/Library/files",
+    "Tests/Library/progress",
+    "Tests/Library/sql",
+    "Tests/Library/sync",
+    "Tests/Library/type_mapping",
+]

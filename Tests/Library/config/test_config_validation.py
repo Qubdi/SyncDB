@@ -29,34 +29,6 @@ class DatabaseConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DatabaseConfig(engine="mysql", host="localhost", database="syncdb")
 
-    def test_sqlite_requires_database_or_connection_string(self):
-        with self.assertRaises(ValueError):
-            DatabaseConfig(engine="sqlite")
-
-    def test_rejects_unknown_engine(self):
-        with self.assertRaises(ValueError):
-            DatabaseConfig(engine="oracle", connection_string="oracle://")
-
-    def test_rejects_invalid_pool_range(self):
-        with self.assertRaises(ValueError):
-            DatabaseConfig(engine="mssql", connection_string="x", pool_min=5, pool_max=2)
-
-    def test_rejects_zero_connect_timeout(self):
-        with self.assertRaises(ValueError):
-            DatabaseConfig(engine="mssql", connection_string="x", connect_timeout=0)
-
-    def test_mysql_connector_parses_url_connection_string(self):
-        config = DatabaseConfig(engine="mysql", connection_string="mysql://admin:secret@localhost:13306/syncdb_test")
-        connector = MySQLConnector(config)
-
-        kwargs = connector._connection_kwargs()
-
-        self.assertEqual(kwargs["host"], "localhost")
-        self.assertEqual(kwargs["port"], 13306)
-        self.assertEqual(kwargs["database"], "syncdb_test")
-        self.assertEqual(kwargs["user"], "admin")
-        self.assertEqual(kwargs["password"], "secret")
-
 
 if __name__ == "__main__":
     unittest.main()
