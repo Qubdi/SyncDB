@@ -16,13 +16,14 @@ Python ETL helper for moving tabular data between **Microsoft SQL Server**, **Po
 - [Filtering Data](#filtering-data)
 - [Schema Evolution](#schema-evolution)
 - [Working with Files](#working-with-files)
+- [Advanced Features](#advanced-features)
 - [Progress Reporting](#progress-reporting)
 - [Reading Sync Results](#reading-sync-results)
 - [Complete Examples](#complete-examples)
 - [API Reference](#api-reference)
 - [Supported File Formats](#supported-file-formats)
 - [Running Tests](#running-tests)
-- [Planned & Proposed Features](#planned--proposed-features)
+- [Roadmap](#roadmap)
 
 ---
 
@@ -154,7 +155,7 @@ sync = SyncDB(source=src, target=dst, batch_size=50_000)
 
 If the destination table does not exist, SyncDB creates it automatically by reading the source schema. You do not need to write any `CREATE TABLE` statements.
 
-### Schema Evolution
+### Automatic Schema Management
 
 When you run a sync on an existing table and the source schema has changed, SyncDB can:
 
@@ -418,6 +419,7 @@ You can sync many tables in a single call. SyncDB opens the source and target co
 | `transform` | no | Callable that receives and returns each batch as `list[dict]` |
 | `incremental_column` | no | Cursor column for persisted high-watermark filtering |
 | `watermark_store` | no | JSON file path for persisted watermark values |
+| `watermark_key` | no | Override the default storage key for the watermark (default: `"source->destination:column"`) |
 | `expect` | no | Data quality checks: `min_rows`, `not_null`, `unique`, `range` |
 | `on_batch` | no | Callback called after each written batch with the current `TableSyncResult` |
 
@@ -593,6 +595,150 @@ ft.write(rows, "data.parquet")
 
 ---
 
+## Advanced Features
+
+### Incremental High-Watermark Sync
+
+Use `incremental_column` to track the maximum value of a cursor column (for example `updated_at`) between runs. SyncDB saves the high-water mark automatically after each sync — no manual `filter` key needed on subsequent runs.
+
+```python
+sync.sync_tables({
+    "orders": {
+        "source": "dbo.orders",
+        "destination": "public.orders",
+        "mode": "append",
+        "primary_key": ["order_id"],
+        "incremental_column": "updated_at",   # SyncDB remembers the max value
+        "watermark_store": "watermarks.json", # persisted between runs
+    }
+})
+```
+
+| Key | Description |
+| --- | --- |
+| `incremental_column` | Column whose maximum value is saved as the cursor |
+| `watermark_store` | Path to a JSON file where values are saved. Defaults to `.syncdb_watermarks.json` |
+| `watermark_key` | Override the storage key used inside the JSON file. Defaults to `"source->destination:column"` |
+
+On the first run there is no saved value, so all rows are copied. From the second run onward only rows with a value greater than the saved mark are read.
+
+---
+
+### Row Transforms
+
+Pass a Python callable to `transform` to modify each batch before it is written — useful for masking PII, unit conversion, or enrichment without a separate pipeline step.
+
+```python
+def mask_pii(rows):
+    for r in rows:
+        r["email"] = "***@***.***"
+        r["phone"] = "***"
+    return rows
+
+sync.sync_tables({
+    "customers": {
+        "source": "dbo.customers",
+        "destination": "public.customers",
+        "transform": mask_pii,
+    }
+})
+```
+
+The function receives each batch as a `list[dict]` and must return a `list[dict]`.
+
+---
+
+### Column Renaming
+
+Use `rename` to map source column names to different target column names. This prevents a renamed column from being treated as a dropped column + new column, which would lose data.
+
+```python
+"orders": {
+    "source": "dbo.orders",
+    "destination": "public.orders",
+    "rename": {"cust_id": "customer_id", "ord_dt": "order_date"},
+}
+```
+
+---
+
+### Column Type Overrides
+
+Use `type_overrides` to specify the exact target column type when the automatic type mapping is not appropriate for your workload.
+
+```python
+"orders": {
+    "source": "dbo.orders",
+    "destination": "public.orders",
+    "type_overrides": {"price": "numeric(18,4)", "notes": "text", "flags": "jsonb"},
+}
+```
+
+---
+
+### Data Quality Checks
+
+Use `expect` to assert data conditions after each table sync. SyncDB raises `ValueError` and populates `result.expectations_failed` when a check fails.
+
+```python
+"orders": {
+    "source": "dbo.orders",
+    "destination": "public.orders",
+    "expect": {
+        "min_rows": 1000,
+        "not_null": ["order_id", "customer_id"],
+        "unique": ["order_id"],
+        "range": {
+            "total_amount": {"min": 0},
+            "discount_pct": {"min": 0, "max": 100},
+        },
+    },
+}
+```
+
+| Check | Description |
+| --- | --- |
+| `min_rows` | Fail if the target table has fewer than this many rows after the sync |
+| `not_null` | List of column names that must contain no null values |
+| `unique` | List of column names (or lists of names) that must have no duplicate values |
+| `range` | Dict of `{column: {min: value, max: value}}` — fail if any value falls outside the bounds |
+
+---
+
+### Per-Batch Callbacks
+
+Supply an `on_batch` callable to be called after every batch. The function receives the current `TableSyncResult` snapshot — useful for custom metrics, rate limiting, or mid-sync alerting.
+
+```python
+def emit_metric(result_so_far):
+    statsd.gauge("etl.rows_written", result_so_far.rows_written)
+
+sync.sync_tables({
+    "orders": {
+        "source": "dbo.orders",
+        "destination": "public.orders",
+        "on_batch": emit_metric,
+    }
+})
+```
+
+---
+
+### Retry on Transient Errors
+
+Set `retry_count` and `retry_delay_seconds` on the `SyncDB` constructor to automatically retry failed batch writes with exponential backoff.
+
+```python
+sync = SyncDB(
+    source=src,
+    target=dst,
+    retry_count=3,           # retry up to 3 times per batch
+    retry_delay_seconds=2.0, # initial delay; doubles after each attempt (2s, 4s, 8s)
+)
+```
+
+---
+
 ## Progress Reporting
 
 SyncDB prints a progress bar as data moves. Three modes are available:
@@ -634,7 +780,25 @@ results = sync.sync_tables({
     "orders":    {"source": "dbo.orders",    "destination": "public.orders"},
     "customers": {"source": "dbo.customers", "destination": "public.customers"},
 })
+# output:
+#
+# SyncDB summary (standard)
+# +-------------+--------+--------------+---------+---------+
+# | table       | mode   | rows written | batches | created |
+# +-------------+--------+--------------+---------+---------+
+# | public.orders    | append | 52,341  | 11      | no      |
+# | public.customers | append | 8,200   | 2       | yes     |
+# +-------------+--------+--------------+---------+---------+
+# total: 60,541 rows in 13 batches across 2 tables
 ```
+
+Use `verbose="detailed"` for a full row with every `TableSyncResult` field, including schema changes, watermark values, and quality-check results.
+
+| `verbose=` | Output |
+| --- | --- |
+| `"standard"` | One line per table — destination, mode, rows written, batches, created flag, and a totals row |
+| `"detailed"` | Full table with all `TableSyncResult` fields including schema changes, watermark, and check results |
+| `None` | Silent — return results only, print nothing |
 
 You can also inspect the returned list directly:
 
@@ -668,6 +832,9 @@ for r in results:
 | `schema_created` | `bool` | `True` if the target schema was created |
 | `columns_added` | `list[str]` | Column names added to target |
 | `columns_dropped` | `list[str]` | Column names dropped from target |
+| `rows_soft_deleted` | `int` | Rows marked `deleted_at` in `soft_delete` mode |
+| `expectations_failed` | `list[str]` | Failure messages from `expect` checks (empty if all passed) |
+| `watermark_value` | `Any` | Highest watermark value seen in this sync run |
 | `dry_run` | `bool` | `True` if this was a dry run |
 
 ---
@@ -1012,236 +1179,23 @@ See [Tests/DataBase/README.md](Tests/DataBase/README.md) for details on test dat
 
 ---
 
-## Planned & Proposed Features
-
-### Added from the roadmap
-
-These proposed items are now available:
-
-- **`insert_only` mode** — pure append with no duplicate checking. Existing target rows are never deleted or updated, even when a primary key is supplied.
-- **Lowercase `ProgressMode` aliases** — `ProgressMode.one_line`, `ProgressMode.multi_line`, and `ProgressMode.none` now work alongside the original uppercase members.
-- **Automatic summary reporting** — pass `verbose="standard"` or `verbose="detailed"` to print a final table after `sync_tables` completes.
-- **`append_staging` mode** — portable staging-table load followed by final live-table replacement.
-- **`upsert`, `snapshot`, and `soft_delete` modes** — explicit upsert semantics, historical `_synced_at` snapshots, and `deleted_at` lifecycle sync.
-- **High-watermark sync** — use `incremental_column` and `watermark_store` to persist cursor values between runs.
-- **Row transforms, column rename mapping, and type overrides** — use `transform`, `rename`, and `type_overrides` in table specs.
-- **Schema-level sync** — use `sync_schema(...)` to sync every source table except excluded patterns.
-- **Data quality checks** — use `expect` to fail on row-count, null, uniqueness, or value-range violations.
-- **`on_batch` callback and retry settings** — use per-table `on_batch` and constructor-level `retry_count` / `retry_delay_seconds`.
-- **SQLite support** — use `DatabaseConfig(engine="sqlite", database="local.db")`.
-
-```python
-sync = SyncDB(
-    source=src,
-    target=dst,
-    progress_mode=ProgressMode.one_line,
-    verbose="standard",
-)
-results = sync.sync_tables({...})
-# prints automatically:
-#
-# +-------------+--------+--------------+---------+---------+
-# | table       | mode   | rows written | batches | created |
-# +-------------+--------+--------------+---------+---------+
-# | orders      | append | 52,341       | 11      | no      |
-# | customers   | append | 8,200        | 2       | yes     |
-# | order_lines | append | 104,820      | 21      | no      |
-# +-------------+--------+--------------+---------+---------+
-# total: 165,361 rows in 34 batches across 3 tables
-```
-
-Verbose levels:
-
-| `verbose=` | Output |
-| --- | --- |
-| `"detailed"` | Full table with all `TableSyncResult` fields including schema changes |
-| `"standard"` | One-line-per-table summary with totals row |
-| `None` | Silent — return results only, print nothing |
-
----
+## Roadmap
 
 ### In Progress
 
-- **Connector-native staging swaps** — upgrade `append_staging` from portable truncate/copy replacement to engine-specific transactional rename/swap where supported.
-- **Connector-native upsert** — replace portable delete+insert upsert with PostgreSQL `ON CONFLICT`, MySQL `ON DUPLICATE KEY`, and MSSQL `MERGE` implementations.
+- **Connector-native staging swaps** — upgrade `append_staging` from the current portable truncate-and-copy strategy to an engine-specific transactional rename/swap where the engine supports it.
+- **Connector-native upsert** — replace the portable delete-then-insert upsert with engine-specific implementations: PostgreSQL `ON CONFLICT`, MySQL `ON DUPLICATE KEY UPDATE`, and MSSQL `MERGE`.
 
----
+### Planned
 
-### Implemented Ideas And Remaining Work
-
-### More Ideas
-
-#### Incremental high-watermark sync
-
-Track the maximum value of a cursor column (e.g. `updated_at`) between runs and automatically set the filter on the next run — no manual `filter` key needed.
-
-```python
-sync.sync_tables({
-    "orders": {
-        "source": "dbo.orders",
-        "destination": "public.orders",
-        "incremental_column": "updated_at",   # SyncDB remembers the max value
-        "watermark_store": "watermarks.json", # persisted between runs
-    }
-})
-```
-
-This is available now. Future work can add database-backed watermark stores and richer cursor comparison options.
-
-#### Row-level transforms
-
-Pass a Python function that receives each batch as a list of dicts and returns the modified list — useful for masking PII, unit conversion, or enrichment without a separate pipeline step.
-
-```python
-def mask_pii(rows):
-    for r in rows:
-        r["email"] = "***@***.***"
-        r["phone"] = "***"
-    return rows
-
-sync.sync_tables({
-    "customers": {
-        "source": "dbo.customers",
-        "destination": "public.customers",
-        "transform": mask_pii,
-    }
-})
-```
-
-This is available now as the `transform` table-spec key.
-
-#### Column rename mapping
-
-Declare a `rename` dict so a column that was renamed in the source maps to the existing target column instead of being treated as an add + drop.
-
-```python
-"orders": {
-    "source": "dbo.orders",
-    "destination": "public.orders",
-    "rename": {"cust_id": "customer_id", "ord_dt": "order_date"},
-}
-```
-
-This is available now as the `rename` table-spec key.
-
-#### Column type overrides
-
-Override the inferred target type for specific columns when the schema mapper's default choice is not right for your workload.
-
-```python
-"type_overrides": {"price": "numeric(18,4)", "notes": "text", "flags": "jsonb"}
-```
-
-This is available now as the `type_overrides` table-spec key.
-
-#### Parallel table sync
-
-Sync independent tables concurrently using a thread pool to cut total wall-clock time.
+**Parallel table sync** — sync independent tables concurrently using a thread pool to cut total wall-clock time.
 
 ```python
 sync = SyncDB(source=src, target=dst, max_workers=4)
 ```
 
-#### Schema-level sync
+**CLI command** — a `syncdb run <config.yaml>` console entry point so sync jobs can be run from scheduled tasks without writing Python code.
 
-Copy every table in a source schema without listing them one by one.
-
-```python
-sync.sync_schema(source_schema="dbo", destination_schema="public")
-# or with exclusions
-sync.sync_schema(source_schema="dbo", destination_schema="public", exclude=["temp_*", "audit_log"])
+```bash
+syncdb run syncdb.yaml
 ```
-
-This is available now as `sync.sync_schema(...)`.
-
-#### Data quality checks
-
-Assert row counts, null rates, or value ranges after each table sync. Fail loudly when the data does not meet expectations.
-
-```python
-"orders": {
-    "source": "dbo.orders",
-    "destination": "public.orders",
-    "expect": {
-        "min_rows": 1000,
-        "not_null": ["order_id", "customer_id"],
-        "unique": ["order_id"],
-    }
-}
-```
-
-This is available now as the `expect` table-spec key.
-
-#### YAML / JSON job config
-
-Define entire sync jobs in a config file and run them from the CLI, making SyncDB usable in scheduled tasks without writing Python code.
-
-```yaml
-# syncdb.yaml
-source:
-  engine: mssql
-  connection_string: "Driver=..."
-
-target:
-  engine: postgresql
-  connection_string: "postgresql://..."
-
-settings:
-  batch_size: 10000
-  verbose: standard
-
-tables:
-  orders:
-    source: dbo.orders
-    destination: public.orders
-    mode: append
-    primary_key: [order_id]
-  customers:
-    source: dbo.customers
-    destination: public.customers
-    mode: full_refresh
-```
-
-```python
-from syncdb import SyncDB
-
-SyncDB.run_config_file("syncdb.yaml")
-```
-
-Config-file execution is available now as `SyncDB.run_config_file(...)`. A dedicated `syncdb run ...` console command is still future work.
-
-#### `on_batch` callback
-
-Call a user-supplied function after each batch — useful for custom metrics, rate limiting, or alerting mid-sync.
-
-```python
-def emit_metric(result_so_far):
-    statsd.gauge("etl.rows_written", result_so_far.rows_written)
-
-sync.sync_tables({
-    "orders": {
-        "source": "dbo.orders",
-        "destination": "public.orders",
-        "on_batch": emit_metric,
-    }
-})
-```
-
-This is available now as the `on_batch` table-spec key.
-
-#### Retry on transient errors
-
-Automatically retry a failed batch with exponential backoff for network hiccups, deadlocks, or transient timeouts — configurable retry count and delay.
-
-This is available now through `SyncDB(retry_count=..., retry_delay_seconds=...)`.
-
-#### SQLite support
-
-A lightweight SQLite connector so SyncDB works entirely locally with no server — great for development, local testing, and small one-off migrations.
-
-```python
-sqlite = DatabaseConfig(engine="sqlite", database="local.db")
-sync = SyncDB(source=pg_cfg, target=sqlite)
-```
-
-This is available now through the stdlib `sqlite3` connector.
