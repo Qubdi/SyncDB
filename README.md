@@ -1200,6 +1200,18 @@ Unit tests (no database required):
 pytest
 ```
 
+To inspect each test and see live SyncDB progress/summary output:
+
+```bash
+pytest Tests/Library/sync --syncdb-live-output
+```
+
+On Windows you can use the helper script:
+
+```powershell
+.\run_tests.ps1 sync -live
+```
+
 Integration tests against real databases require Docker:
 
 ```bash

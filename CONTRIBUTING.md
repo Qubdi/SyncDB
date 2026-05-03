@@ -100,13 +100,20 @@ Run a specific suite (faster feedback while working on one module):
 # PowerShell
 .\run_tests.ps1 sync          # only the sync/ suite
 .\run_tests.ps1 config -v     # with verbose output
+.\run_tests.ps1 sync -live    # show each test plus SyncDB progress/summary output
 
 # or call pytest directly
 pytest Tests/Library/sync
 pytest Tests/Library/sync -v -k "upsert"   # filter by test name
+pytest Tests/Library/sync --syncdb-live-output
 ```
 
 Available suites: `config`, `connectors`, `files`, `progress`, `sql`, `sync`, `type_mapping`
+
+Use `-live` / `--syncdb-live-output` when debugging workflows such as batched
+table movement. It forces verbose pytest output, disables output capture, and
+makes sync tests print batch progress plus final SyncDB summaries. Normal test
+runs stay quiet for CI readability.
 
 The pre-push hook runs `pytest` automatically before every `git push`. To skip
 it in an emergency: `git push --no-verify`

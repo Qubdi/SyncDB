@@ -2,13 +2,15 @@
 #   .\run_tests.ps1              - run all tests
 #   .\run_tests.ps1 sync         - run a specific suite
 #   .\run_tests.ps1 sync -v      - run with verbose output
+#   .\run_tests.ps1 sync -live   - show each test plus SyncDB progress/summary output
 #
 # Available suites: config, connectors, files, progress, sql, sync, type_mapping
 # Prerequisite from repo root: pip install -e ".[dev]"
 
 param(
     [string]$Suite = "all",
-    [switch]$v
+    [switch]$v,
+    [switch]$live
 )
 
 $suites = @{
@@ -23,6 +25,7 @@ $suites = @{
 
 $pytest_args = @()
 if ($v) { $pytest_args += "-v" }
+if ($live) { $pytest_args += "--syncdb-live-output" }
 
 if ($Suite -eq "all") {
     pytest @pytest_args
