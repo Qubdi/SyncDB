@@ -140,6 +140,10 @@ class SyncDB:
         if self.source is None or self.target is None:
             raise ValueError("source and target connectors/configs are required for database sync")
         results: list[TableSyncResult] = []
+        # Connections are opened once here and reused across all tables in the dict.
+        # This avoids per-table connection overhead (especially relevant for MSSQL
+        # where ODBC connection setup can take hundreds of milliseconds).
+        # Both are closed unconditionally in `finally` even if a table sync raises.
         self.source.connect()
         self.target.connect()
         try:
@@ -333,6 +337,10 @@ class SyncDB:
             # loaded, then does a final truncate/copy.  It is portable across engines;
             # a future connector-native implementation can upgrade this to true
             # transactional rename/swap where the engine supports it.
+            #
+            # The staging table is always dropped first (idempotent re-runs) and is
+            # dropped again in the `finally` block below even on failure, so stale
+            # staging tables never accumulate across runs.
             self.target.drop_table(target_name.schema, staging_table)
             self.target.create_table(target_name.schema, staging_table, target_columns)
             write_table = staging_table
@@ -378,6 +386,12 @@ class SyncDB:
                 def write_batch() -> int:
                     # APPEND/UPSERT/SOFT_DELETE replace rows that match on PK. INSERT_ONLY
                     # and SNAPSHOT deliberately preserve existing target rows.
+                    #
+                    # This closure captures `write_schema` and `write_table`, NOT
+                    # `target_name.schema`/`target_name.table` directly.  In
+                    # APPEND_STAGING mode those two variables are rebound to point
+                    # at the staging table, so the closure automatically routes
+                    # writes to staging without any extra branching.
                     if mode in {TransferMode.APPEND, TransferMode.UPSERT, TransferMode.SOFT_DELETE} and target_primary_key:
                         self.target.delete_matching_rows(write_schema, write_table, batch, target_primary_key)
                     return self.target.insert_batch(write_schema, write_table, batch, target_column_names)
@@ -546,7 +560,15 @@ class SyncDB:
         primary_key: Sequence[str],
         seen_keys: set[tuple[Any, ...]],
     ) -> int:
-        """Mark target rows missing from the source as deleted."""
+        """Mark target rows missing from the source as deleted.
+
+        PERFORMANCE NOTE: This method fetches ALL target rows (primary key columns
+        only) to find rows that were absent from the source.  For tables with tens of
+        millions of rows this can be slow and memory-intensive.  If that becomes a
+        problem, consider splitting the SOFT_DELETE logic into a separate scheduled
+        cleanup job that compares source/target via a JOIN rather than pulling all
+        keys into Python.
+        """
         missing: list[dict[str, Any]] = []
         for batch in self.target.fetch_batches(schema, table, columns=primary_key, batch_size=self.batch_size):
             for row in batch:
@@ -579,7 +601,17 @@ class SyncDB:
         return data if isinstance(data, dict) else {}
 
     def _save_watermark(self, config: dict[str, Any], value: Any) -> None:
-        """Persist the latest processed incremental value after a successful sync."""
+        """Persist the latest processed incremental value after a successful sync.
+
+        CONSISTENCY NOTE: _max_value() updates the in-memory watermark value as each
+        batch is streamed, but _save_watermark() is only called after ALL batches
+        complete without error.  If the sync fails mid-stream, the watermark file is
+        NOT updated — the next run re-reads from the last persisted value, which means
+        some rows near the watermark boundary will be re-processed.  This is an
+        at-least-once delivery guarantee, NOT exactly-once.  Target tables should be
+        idempotent (i.e. APPEND/UPSERT mode) when using incremental sync to tolerate
+        duplicate rows arriving from the overlap window.
+        """
         path: Path = config["path"]
         values = self._read_watermark_file(path)
         values[config["key"]] = value.isoformat() if hasattr(value, "isoformat") else value
@@ -622,7 +654,15 @@ class SyncDB:
         expect: dict[str, Any] | None,
         result: TableSyncResult,
     ) -> None:
-        """Run optional data-quality checks after a table sync."""
+        """Run optional data-quality checks after a table sync.
+
+        PERFORMANCE NOTE: All target rows are fetched into memory for checking.
+        This is intentionally simple and suitable for tables up to a few million rows.
+        For very large tables, consider running expectations via a separate SQL-based
+        monitoring job (e.g. dbt tests, Great Expectations) rather than loading all
+        rows into Python.  The `expect` block is best used as a lightweight sanity
+        check, not a full data-quality framework.
+        """
         if not expect:
             return
         rows = [row for batch in self.target.fetch_batches(schema, table, batch_size=self.batch_size) for row in batch]
@@ -690,6 +730,11 @@ class SyncDB:
         Only four broad types are produced (boolean, bigint, double precision, text)
         because file formats like CSV carry no type metadata; the target table can
         always be pre-created manually for finer control.
+
+        CAVEAT: Only the FIRST row is sampled.  If a column is None in that row but
+        contains integers in subsequent rows, the column will be inferred as "text".
+        Pre-create the target table with explicit types when type accuracy matters,
+        especially for CSV files where every value arrives as a string anyway.
         """
         if not rows:
             raise ValueError("Cannot infer a target table from an empty file")

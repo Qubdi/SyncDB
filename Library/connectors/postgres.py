@@ -41,7 +41,9 @@ class PostgresConnector(BaseConnector):
             self.connection = psycopg2.connect(self.config.connection_string, connect_timeout=self.config.connect_timeout)
         else:
             kwargs = self.config.as_connection_kwargs()
-            # psycopg2 uses "dbname", not "database"; rename before passing.
+            # psycopg2 uses "dbname" where every other driver uses "database".
+            # This rename must happen here, not in DatabaseConfig, because
+            # other connectors (MySQL, MSSQL) correctly expect "database".
             kwargs["dbname"] = kwargs.pop("database")
             self.connection = psycopg2.connect(**kwargs)
 

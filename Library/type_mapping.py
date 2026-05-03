@@ -259,8 +259,10 @@ class SchemaMapper:
         if data_type == "real":
             return "float"
         if data_type in {"timestamp", "timestamptz", "datetime", "datetime2", "datetimeoffset", "smalldatetime"}:
-            # MySQL DATETIME has no timezone; timezone info from timestamptz /
-            # datetimeoffset is silently discarded on this path.
+            # LOSSY: MySQL DATETIME has no timezone.  timezone info carried by
+            # PostgreSQL timestamptz or MSSQL datetimeoffset is silently discarded
+            # here.  If timezone preservation matters, store as varchar(32) and
+            # format the value as an ISO-8601 string before syncing.
             return "datetime"
         if data_type == "date":
             return "date"
@@ -281,7 +283,13 @@ class SchemaMapper:
         """Map source types to SQLite affinity names.
 
         SQLite accepts arbitrary type strings, but using the five standard
-        affinities keeps generated DDL predictable and easy to inspect.
+        affinities (NULL, INTEGER, REAL, TEXT, BLOB) keeps generated DDL
+        predictable and easy to inspect.
+
+        NOTE: SQLite's type system is dynamic — the affinity name is a hint,
+        not a strict constraint.  Any value can be stored in any column.
+        If strict typing matters, create the SQLite table manually with
+        STRICT mode (SQLite 3.37+) before syncing.
         """
         if data_type in {"bigint", "bigserial", "int", "integer", "mediumint", "serial", "smallint", "tinyint", "bit", "boolean", "bool"}:
             return "integer"

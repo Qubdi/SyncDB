@@ -35,6 +35,10 @@ class SQLiteConnector(BaseConnector):
         if database != ":memory:":
             Path(database).parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(database, timeout=self.config.connect_timeout)
+        # row_factory = sqlite3.Row makes cursor rows support both index-based and
+        # column-name-based access (e.g. row["name"]).  dict(row) then produces a
+        # plain dict matching the connector contract, without needing to zip column
+        # names manually as the other connectors do.
         self.connection.row_factory = sqlite3.Row
 
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
@@ -125,6 +129,10 @@ class SQLiteConnector(BaseConnector):
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}")
 
     def truncate_table(self, schema: str | None, table: str) -> None:
+        # SQLite has no TRUNCATE statement; DELETE FROM achieves the same logical
+        # effect.  Unlike server databases, SQLite's DELETE logs individual row
+        # deletions (affecting WAL/journal size), but for the row counts SyncDB
+        # works with this is not a meaningful performance difference.
         self.execute_query(f"DELETE FROM {self.quote_table(schema, table)}")
 
     def list_tables(self, schema: str | None = None) -> list[str]:

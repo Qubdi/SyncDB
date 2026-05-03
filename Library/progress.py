@@ -19,6 +19,11 @@ from typing import TextIO
 
 
 class ProgressMode(str, Enum):
+    # Each mode has both an UPPER_CASE and lowercase alias so that both
+    #   ProgressMode("ONE_LINE")  and  ProgressMode("one_line")
+    # resolve to the same member.  This matters for YAML/JSON job configs where
+    # the value may be typed in lowercase.  The canonical storage value is
+    # always lowercase (e.g. "one_line") to match the Enum(str) contract.
     ONE_LINE = "one_line"
     one_line = "one_line"
     MULTI_LINE = "multi_line"

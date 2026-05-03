@@ -29,6 +29,23 @@ class BaseConnector(ABC):
       quote_char  - identifier quote character for that engine
                     '"' (PostgreSQL/MySQL double-quote), '`' (MySQL backtick), '[' (MSSQL)
       placeholder - parameterised query placeholder: '?' (pyodbc) or '%s' (psycopg2/pymysql)
+
+    Implementing a new connector — checklist
+    -----------------------------------------
+    1. Subclass BaseConnector and set `engine`, `quote_char`, `placeholder` as class attrs.
+    2. Implement all @abstractmethod methods.  The shared helpers (list_tables,
+       get_row_count, delete_matching_rows, update_matching_rows, copy_table_rows,
+       drop_table) use only `execute_query` and `quote_char`, so they are free for the
+       subclass to inherit without override unless the engine needs different SQL.
+    3. Make connect() idempotent: guard with `if self.connection is not None: return`.
+    4. Lazy-import the driver inside connect() so users who don't need this engine
+       don't pay the import cost or get ImportError at package load time.
+    5. execute_query() must auto-commit DML/DDL (no result set) and return [] for them.
+    6. fetch_batches() must use cursor.fetchmany(batch_size), not fetchall(), to avoid
+       loading entire result sets into memory.
+    7. create_schema() must be idempotent (IF NOT EXISTS equivalent).
+    8. Register the connector in connections.py, connectors/__init__.py, config.py, and
+       type_mapping.py — see connections.py module docstring for the full checklist.
     """
 
     engine: str

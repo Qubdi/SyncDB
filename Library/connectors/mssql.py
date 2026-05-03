@@ -160,8 +160,10 @@ class MSSQLConnector(BaseConnector):
         if not schema:
             return
         # validate_identifier is also called upstream by parse_qualified_name,
-        # but we enforce it here because schema is embedded in a raw string literal
-        # inside the EXEC call, where parameterisation is not possible.
+        # but we MUST call it here too because schema is embedded directly in a
+        # raw string literal inside the EXEC call — parameterisation is impossible
+        # for schema names in MSSQL DDL.  Removing this check would open a DDL
+        # injection vector even if upstream validation is present.
         validate_identifier(schema)
         # CREATE SCHEMA must run in its own batch (no other statements on the same
         # batch); EXEC() isolates it so it can follow other DDL in the same connection.

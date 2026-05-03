@@ -28,6 +28,13 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Blocks statement terminators (;), inline comments (--), block comments (/* */),
 # and MSSQL extended stored procedure prefixes (xp_, sp_) that could be used for
 # command execution or stacked queries.
+#
+# IMPORTANT — this is a partial safety net, NOT a full SQL sanitizer.  Raw WHERE
+# clauses from untrusted sources (user-supplied HTTP parameters, un-validated
+# config values) should be treated as injection risks regardless of this check.
+# The intended use case is developer-authored filter expressions in job configs.
+# Never add a flag to skip this check; extend the deny-list instead if a
+# legitimate token is being blocked.
 _UNSAFE_WHERE_TOKENS = (";", "--", "/*", "*/", " xp_", " sp_")
 
 

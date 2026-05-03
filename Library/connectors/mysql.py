@@ -189,6 +189,12 @@ class MySQLConnector(BaseConnector):
 
         Accepted URL schemes: mysql://, mysql+pymysql://, mysql+mysqlconnector://
         URL percent-encoding is decoded from username and password fields.
+
+        NOTE: The "mysql+driver" prefixes follow SQLAlchemy URL convention so that
+        connection strings written for SQLAlchemy-based tools (Alembic, dbt, etc.)
+        can be reused here without modification.  Only the host/port/user/password/db
+        components are extracted; SQLAlchemy query parameters (e.g. ?charset=utf8mb4)
+        are NOT parsed.  Pass those via DatabaseConfig.options instead.
         """
         if not self.config.connection_string:
             return self.config.as_connection_kwargs()

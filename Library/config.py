@@ -90,6 +90,13 @@ class DatabaseConfig:
     connect_timeout: int = 30
     pool_min: int = 1
     pool_max: int = 5
+    # Engine-specific pass-through options forwarded verbatim to the driver.
+    # Common uses per engine:
+    #   MSSQL:      {"driver": "{ODBC Driver 18 for SQL Server}", "TrustServerCertificate": "no"}
+    #   PostgreSQL: {"sslmode": "require", "application_name": "syncdb"}
+    #   MySQL:      {"ssl_ca": "/path/to/ca.pem", "charset": "utf8mb4"}
+    # These keys are merged last in as_connection_kwargs(), so they can override
+    # any default field (including connect_timeout).
     options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -145,6 +152,11 @@ class DatabaseConfig:
         None values are stripped so drivers that reject unexpected None kwargs
         (e.g. psycopg2 for an absent password) don't raise spurious errors.
         Caller-supplied options are merged last so they can override any default.
+
+        NOTE: engine, default_schema, pool_min, and pool_max are intentionally
+        excluded — they are SyncDB concepts and not recognized by any DB driver.
+        PostgreSQL also requires a key rename: "database" → "dbname"; that rename
+        is done in PostgresConnector.connect(), not here.
         """
         kwargs: dict[str, Any] = {
             "host": self.host,
