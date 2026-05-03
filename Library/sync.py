@@ -22,7 +22,7 @@ from .config import DatabaseConfig
 from .connections import create_connector
 from .connectors.base import BaseConnector
 from .files import FileTransfer
-from .progress import ProgressMode, ProgressReporter
+from .progress import ProgressMode, ProgressReporter, _format_elapsed
 from .sql import build_order_by, build_where_clause, parse_qualified_name, quote_identifier, validate_identifier
 from .type_mapping import Column, SchemaMapper
 
@@ -70,6 +70,7 @@ class TableSyncResult:
     expectations_failed: list[str] = field(default_factory=list)
     watermark_value: Any = None
     dry_run: bool = False
+    duration_seconds: float = 0.0
 
 
 class SyncDB:
@@ -127,12 +128,20 @@ class SyncDB:
         self.retry_count = retry_count
         self.retry_delay_seconds = retry_delay_seconds
 
-    def sync_tables(self, tables: dict[str, dict[str, Any]]) -> list[TableSyncResult]:
+    def sync_tables(
+        self,
+        tables: dict[str, dict[str, Any]],
+        batch_size: int | str | None = None,
+    ) -> list[TableSyncResult]:
         """Synchronize one or more database tables from source to target.
 
         tables is a dict keyed by a user-assigned logical name.  Each value is
         a spec dict with at minimum "source" and "destination" table names, plus
-        optional "mode", "filter", "order_by", and "primary_key" keys.
+        optional "mode", "filter", "order_by", "primary_key", and "batch_size" keys.
+
+        batch_size overrides the instance-level batch_size for every table in this
+        call.  A per-table "batch_size" key inside the spec takes precedence over
+        this argument, which in turn takes precedence over the SyncDB default.
 
         Connections are opened once and reused across all tables; both are always
         closed (even on error) via the finally block.
@@ -148,6 +157,10 @@ class SyncDB:
         self.target.connect()
         try:
             for name, spec in tables.items():
+                # Per-table batch_size in the spec wins; method-level batch_size fills
+                # in when the spec doesn't specify one.
+                if batch_size is not None and "batch_size" not in spec:
+                    spec = {**spec, "batch_size": batch_size}
                 results.append(self._sync_one_table(name, spec))
         finally:
             # finish() emits the trailing newline for ONE_LINE progress mode.
@@ -163,6 +176,7 @@ class SyncDB:
         destination_schema: str | None,
         exclude: Sequence[str] | None = None,
         mode: str = TransferMode.APPEND.value,
+        batch_size: int | str | None = None,
         **table_defaults: Any,
     ) -> list[TableSyncResult]:
         """Synchronize every table in a source schema.
@@ -171,6 +185,10 @@ class SyncDB:
         values like ["tmp_*", "audit_log"].  table_defaults are copied into every
         generated table spec, letting callers set mode, batch options, or expect
         rules once for the whole schema.
+
+        batch_size overrides the instance-level batch_size for every table in this
+        schema sync.  A per-table "batch_size" key inside table_defaults takes
+        precedence over this argument.
         """
         if self.source is None:
             raise ValueError("source connector/config is required for schema sync")
@@ -190,7 +208,7 @@ class SyncDB:
             for name in names
             if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
         }
-        return self.sync_tables(tables)
+        return self.sync_tables(tables, batch_size=batch_size)
 
     @classmethod
     def from_job_config(cls, config: dict[str, Any]) -> "SyncDB":
@@ -301,6 +319,7 @@ class SyncDB:
         parse the spec, align schema, stream batches, then apply optional modes
         such as staging, snapshots, soft deletes, watermarks, and expectations.
         """
+        _t0 = time.monotonic()
         if "source" not in spec or "destination" not in spec:
             raise ValueError(f"Table spec '{name}' must include source and destination")
 
@@ -353,7 +372,7 @@ class SyncDB:
             filter_sql, params = self._apply_watermark_filter(filter_sql, params, watermark_cfg["column"], watermark_cfg["value"])
         order_sql = build_order_by(spec.get("order_by"), self.source.quote_char)
         total = self._safe_source_count(source_name.schema, source_name.table, filter_sql, params)
-        batch_size = self._resolve_batch_size(total)
+        batch_size = self._resolve_batch_size(total, spec.get("batch_size"))
         column_names = [column.name for column in source_columns]
         target_column_names = [column.name for column in target_columns]
         # Prefer an explicit primary_key list from the spec; fall back to columns
@@ -365,6 +384,7 @@ class SyncDB:
         snapshot_ts = datetime.now(timezone.utc).isoformat() if mode == TransferMode.SNAPSHOT else None
         seen_keys: set[tuple[Any, ...]] = set()
 
+        self.progress.start()
         try:
             for raw_batch in self.source.fetch_batches(
                 source_name.schema,
@@ -420,6 +440,7 @@ class SyncDB:
             if staging_table:
                 self.target.drop_table(target_name.schema, staging_table)
 
+        result.duration_seconds = time.monotonic() - _t0
         return result
 
     def _sync_schema(
@@ -768,8 +789,17 @@ class SyncDB:
             raise ValueError("batch_size must be greater than zero")
         return batch_size, None
 
-    def _resolve_batch_size(self, total: int | None) -> int:
-        """Return the effective batch size, resolving a percentage against the total row count."""
+    def _resolve_batch_size(self, total: int | None, override: int | str | None = None) -> int:
+        """Return the effective batch size, resolving a percentage against the total row count.
+
+        override takes precedence over the instance-level batch_size when provided,
+        allowing per-table or per-schema customisation without mutating the object.
+        """
+        if override is not None:
+            size, pct = self._parse_batch_size(override)
+            if pct is not None and total and total > 0:
+                return max(1, int(total * pct))
+            return size
         if self._batch_pct is None:
             return self.batch_size
         if total and total > 0:
@@ -819,7 +849,7 @@ class SyncDB:
         if self.verbose is None:
             return
         if self.verbose == "standard":
-            headers = ["table", "mode", "rows written", "batches", "created"]
+            headers = ["table", "mode", "rows written", "batches", "created", "time"]
             rows = [
                 [
                     result.destination,
@@ -827,6 +857,7 @@ class SyncDB:
                     f"{result.rows_written:,}",
                     str(result.batches),
                     "yes" if result.table_created else "no",
+                    _format_elapsed(result.duration_seconds),
                 ]
                 for result in results
             ]
@@ -847,6 +878,7 @@ class SyncDB:
                 "checks",
                 "watermark",
                 "dry run",
+                "time",
             ]
             rows = [
                 [
@@ -865,16 +897,19 @@ class SyncDB:
                     "fail" if result.expectations_failed else "ok",
                     str(result.watermark_value) if result.watermark_value is not None else "-",
                     "yes" if result.dry_run else "no",
+                    _format_elapsed(result.duration_seconds),
                 ]
                 for result in results
             ]
 
+        total_duration = sum(r.duration_seconds for r in results)
         self.verbose_stream.write(f"\nSyncDB summary ({self.verbose})\n")
         self._write_table(headers, rows)
         self.verbose_stream.write(
             f"total: {sum(result.rows_written for result in results):,} rows "
             f"in {sum(result.batches for result in results):,} batches "
-            f"across {len(results):,} tables\n"
+            f"across {len(results):,} tables "
+            f"in {_format_elapsed(total_duration)}\n"
         )
         self.verbose_stream.flush()
 

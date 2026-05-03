@@ -102,7 +102,7 @@ class PostgresConnector(BaseConnector):
     def get_columns(self, schema: str | None, table: str) -> list[Column]:
         rows = self.execute_query(
             """
-            SELECT column_name, data_type, character_maximum_length,
+            SELECT column_name, data_type, udt_name, character_maximum_length,
                    numeric_precision, numeric_scale, is_nullable
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
@@ -114,7 +114,7 @@ class PostgresConnector(BaseConnector):
         return [
             Column(
                 name=row["column_name"],
-                data_type=row["data_type"],
+                data_type=self._resolve_data_type(row["data_type"], row.get("udt_name", "")),
                 char_length=row["character_maximum_length"],
                 numeric_precision=row["numeric_precision"],
                 numeric_scale=row["numeric_scale"],
@@ -123,6 +123,15 @@ class PostgresConnector(BaseConnector):
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _resolve_data_type(data_type: str, udt_name: str) -> str:
+        # information_schema reports 'ARRAY' for array columns; the actual element
+        # type is in udt_name with a leading underscore (e.g. '_text' → 'text[]').
+        if (data_type or "").upper() == "ARRAY":
+            element = (udt_name or "").lstrip("_")
+            return f"{element}[]" if element else "text[]"
+        return data_type
 
     def get_primary_keys(self, schema: str | None, table: str) -> list[str]:
         rows = self.execute_query(

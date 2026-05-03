@@ -140,12 +140,12 @@ sync.sync_tables({
 # SyncDB prints a summary automatically:
 #
 # SyncDB summary (standard)
-# +-----------------+--------+--------------+---------+---------+
-# | table           | mode   | rows written | batches | created |
-# +-----------------+--------+--------------+---------+---------+
-# | public.orders   | append | 52,341       | 11      | no      |
-# +-----------------+--------+--------------+---------+---------+
-# total: 52,341 rows in 11 batches across 1 tables
+# +-----------------+--------+--------------+---------+---------+-------+
+# | table           | mode   | rows written | batches | created | time  |
+# +-----------------+--------+--------------+---------+---------+-------+
+# | public.orders   | append | 52,341       | 11      | no      | 3.2s  |
+# +-----------------+--------+--------------+---------+---------+-------+
+# total: 52,341 rows in 11 batches across 1 tables in 3.2s
 ```
 
 ### Export a query result to a Parquet file
@@ -190,6 +190,36 @@ sync = SyncDB(source=src, target=dst, batch_size="10%")    # 10% of total rows p
 ```
 
 When a percentage is given but the total row count cannot be determined (for example, due to missing `SELECT COUNT(*)` permission), SyncDB falls back to the default of 5,000 rows.
+
+`batch_size` can be overridden at three levels. More specific settings always win:
+
+| Level | How to set | Applies to |
+| --- | --- | --- |
+| Global (SyncDB constructor) | `SyncDB(..., batch_size=5000)` | All tables, all calls |
+| Per-call (`sync_tables` / `sync_schema`) | `sync.sync_tables(tables, batch_size=10_000)` | All tables in that single call |
+| Per-table (table spec) | `{"batch_size": 500}` inside the spec dict | That one table only |
+
+```python
+# Override for one sync_tables call — all tables in this call use 10 000
+results = sync.sync_tables(tables, batch_size=10_000)
+
+# Override for one schema sync call
+results = sync.sync_schema("dbo", "public", batch_size="5%")
+
+# Override for a single table inside the spec dict
+results = sync.sync_tables({
+    "wide_table": {
+        "source": "dbo.wide_table",
+        "destination": "public.wide_table",
+        "batch_size": 500,   # overrides the global and call-level setting
+    },
+    "small_table": {
+        "source": "dbo.small_table",
+        "destination": "public.small_table",
+        # no batch_size → uses the call-level or global default
+    },
+})
+```
 
 ### Automatic Table Creation
 
@@ -446,6 +476,7 @@ You can sync many tables in a single call. SyncDB opens the source and target co
 | `source` | yes | Source table name: `"schema.table"` or `"table"` |
 | `destination` | yes | Target table name: `"schema.table"` or `"table"` |
 | `mode` | no | Transfer mode: `"append"`, `"insert_only"`, `"upsert"`, `"full_refresh"`, `"append_staging"`, `"snapshot"`, `"soft_delete"`. Default: `"append"` |
+| `batch_size` | no | Override batch size for this table only — integer or percentage string. Takes precedence over the call-level and global `batch_size` |
 | `primary_key` | no | Override PK columns. Auto-detected from source schema when omitted |
 | `order_by` | no | Column(s) to sort source reads for deterministic batching |
 | `filter` | no | Restrict which source rows are read (see [Filtering Data](#filtering-data)) |
@@ -783,7 +814,7 @@ SyncDB prints a progress bar as data moves. Three modes are available:
 | Mode | Behavior | Best for |
 | --- | --- | --- |
 | `ProgressMode.multi_line` | New line per batch (default) | CI logs, log files |
-| `ProgressMode.one_line` | Overwrites the same line | Interactive terminals |
+| `ProgressMode.one_line` | Overwrites the same line per table, then commits it | Interactive terminals |
 | `ProgressMode.none` | Silent | Scheduled jobs, custom logging |
 
 ```python
@@ -802,7 +833,14 @@ sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.none)
 sync = SyncDB(source=src, target=dst, progress_mode="one_line")
 ```
 
-When a total row count is available (SELECT COUNT(*) succeeds), the bar shows percentage and estimated position. When the count query fails due to permissions, it falls back to displaying the running row count.
+When a total row count is available (`SELECT COUNT(*)` succeeds), the bar shows a filled progress bar, percentage, row count, and elapsed time. When the count query fails due to permissions, it falls back to displaying the running row count and elapsed time.
+
+```text
+public.orders     [=============>.......................]   40%       4,000 / 10,000  1.2s
+public.customers  [====================]  100%       8,200 /  8,200  0.9s
+```
+
+In `one_line` mode each table keeps its own output row — completed tables remain visible as new tables begin. Elapsed time resets at the start of each table.
 
 ---
 
@@ -820,13 +858,13 @@ results = sync.sync_tables({
 # output:
 #
 # SyncDB summary (standard)
-# +-------------+--------+--------------+---------+---------+
-# | table       | mode   | rows written | batches | created |
-# +-------------+--------+--------------+---------+---------+
-# | public.orders    | append | 52,341  | 11      | no      |
-# | public.customers | append | 8,200   | 2       | yes     |
-# +-------------+--------+--------------+---------+---------+
-# total: 60,541 rows in 13 batches across 2 tables
+# +------------------+--------+--------------+---------+---------+------+
+# | table            | mode   | rows written | batches | created | time |
+# +------------------+--------+--------------+---------+---------+------+
+# | public.orders    | append | 52,341       | 11      | no      | 3.2s |
+# | public.customers | append | 8,200        | 2       | yes     | 0.9s |
+# +------------------+--------+--------------+---------+---------+------+
+# total: 60,541 rows in 13 batches across 2 tables in 4.1s
 ```
 
 Use `verbose="detailed"` for a full row with every `TableSyncResult` field, including schema changes, watermark values, and quality-check results.
@@ -871,6 +909,7 @@ for r in results:
 | `expectations_failed` | `list[str]` | Failure messages from `expect` checks (empty if all passed) |
 | `watermark_value` | `Any` | Highest watermark value seen in this sync run |
 | `dry_run` | `bool` | `True` if this was a dry run |
+| `duration_seconds` | `float` | Wall-clock seconds from start to finish for this table |
 
 ---
 
@@ -1115,15 +1154,20 @@ SyncDB(
 | `retry_count` | Retry failed batch writes this many times | `0` |
 | `retry_delay_seconds` | Initial retry delay; doubles after each retry | `1.0` |
 
-### `SyncDB.sync_tables(tables)`
+### `SyncDB.sync_tables(tables, batch_size)`
 
 ```python
-sync.sync_tables(tables: dict[str, dict]) -> list[TableSyncResult]
+sync.sync_tables(
+    tables: dict[str, dict],
+    batch_size: int | str | None = None,
+) -> list[TableSyncResult]
 ```
 
 Syncs one or more tables. Opens connections once, reuses them for all tables, always closes both on completion or error.
 
-### `SyncDB.sync_schema(source_schema, destination_schema, exclude, mode, **table_defaults)`
+`batch_size` overrides the instance-level default for every table in this call. A `"batch_size"` key inside an individual table spec takes precedence over this argument.
+
+### `SyncDB.sync_schema(source_schema, destination_schema, exclude, mode, batch_size, **table_defaults)`
 
 ```python
 sync.sync_schema(
@@ -1131,11 +1175,12 @@ sync.sync_schema(
     destination_schema="public",
     exclude=["tmp_*", "audit_log"],
     mode="append",
-    expect={"not_null": ["id"]},
+    batch_size=10_000,           # optional — overrides instance default for this call
+    expect={"not_null": ["id"]}, # extra kwargs are copied into every table spec
 )
 ```
 
-Discovers source tables through the connector and builds a `sync_tables` spec automatically. Extra keyword arguments are copied into every generated table spec.
+Discovers source tables through the connector and builds a `sync_tables` spec automatically. `batch_size` overrides the instance-level default for every table in this schema sync. Extra keyword arguments are copied into every generated table spec.
 
 ### `SyncDB.run_config_file(path)`
 

@@ -64,7 +64,7 @@ class MySQLConnector(BaseConnector):
         if not cursor.description:
             self.connection.commit()
             return []
-        columns = [col[0] for col in cursor.description]
+        columns = [col[0].lower() for col in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def fetch_batches(
