@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .config import DatabaseConfig
 from .connections import create_connector
@@ -21,6 +22,9 @@ class TransferMode(str, Enum):
     # Upsert-style: delete-then-insert for rows that match on primary key,
     # append new rows.  Safe for incremental loads where source rows may be updated.
     APPEND = "append"
+    # Pure append: insert every source row as-is and never delete/update existing
+    # target rows.  Useful for immutable event streams, audit logs, and history tables.
+    INSERT_ONLY = "insert_only"
     # Intended for a future implementation that bulk-loads into a staging table
     # and then swaps atomically.  Currently behaves identically to APPEND because
     # true staging requires connector-level support (temp table creation, swap DDL).
@@ -76,6 +80,8 @@ class SyncDB:
         target_connector: BaseConnector | None = None,
         schema_mapper: SchemaMapper | None = None,
         file_transfer: FileTransfer | None = None,
+        verbose: str | None = None,
+        verbose_stream: TextIO | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than zero")
@@ -91,6 +97,11 @@ class SyncDB:
         self.drop_extra_columns = drop_extra_columns
         self.schema_mapper = schema_mapper or SchemaMapper()
         self.file_transfer = file_transfer or FileTransfer()
+        # verbose controls an optional post-run summary.  It is intentionally
+        # separate from progress reporting: progress is per batch, while verbose
+        # is a final audit view over TableSyncResult objects.
+        self.verbose = self._normalize_verbose(verbose)
+        self.verbose_stream = verbose_stream or sys.stdout
 
     def sync_tables(self, tables: dict[str, dict[str, Any]]) -> list[TableSyncResult]:
         """Synchronize one or more database tables from source to target.
@@ -115,6 +126,7 @@ class SyncDB:
             self.progress.finish()
             self.source.close()
             self.target.close()
+        self._emit_summary(results)
         return results
 
     def export_query_to_file(
@@ -219,6 +231,8 @@ class SyncDB:
         ):
             # For APPEND modes: delete existing rows that match this batch on PK
             # before re-inserting so updated source rows replace stale target rows.
+            # INSERT_ONLY deliberately skips this even when a PK is supplied, because
+            # duplicate keys may be valid facts in append-only audit/event tables.
             # FULL_REFRESH skips this because the table was already truncated above.
             if mode in {TransferMode.APPEND, TransferMode.APPEND_STAGING} and primary_key:
                 self.target.delete_matching_rows(target_name.schema, target_name.table, batch, primary_key)
@@ -322,3 +336,103 @@ class SyncDB:
         if isinstance(value, DatabaseConfig):
             return create_connector(value)
         raise TypeError("Expected DatabaseConfig, BaseConnector, or None")
+
+    def _normalize_verbose(self, verbose: str | None) -> str | None:
+        """Validate the summary mode once during construction.
+
+        Accepting "none" as a string is convenient for YAML/JSON job configs, where
+        the natural `None` value may arrive as text after parsing environment input.
+        """
+        if verbose is None:
+            return None
+        value = str(verbose).strip().lower()
+        if value in {"", "none"}:
+            return None
+        if value in {"standard", "detailed"}:
+            return value
+        raise ValueError("verbose must be one of: None, 'standard', 'detailed'")
+
+    def _emit_summary(self, results: list[TableSyncResult]) -> None:
+        """Print a final sync summary when verbose mode is enabled.
+
+        The method receives completed TableSyncResult objects only.  If a sync
+        raises before finishing, Python propagates the exception after the finally
+        cleanup block in sync_tables, so no misleading partial summary is printed.
+        """
+        if self.verbose is None:
+            return
+        if self.verbose == "standard":
+            headers = ["table", "mode", "rows written", "batches", "created"]
+            rows = [
+                [
+                    result.destination,
+                    result.mode,
+                    f"{result.rows_written:,}",
+                    str(result.batches),
+                    "yes" if result.table_created else "no",
+                ]
+                for result in results
+            ]
+        else:
+            headers = [
+                "name",
+                "source",
+                "destination",
+                "mode",
+                "read",
+                "written",
+                "batches",
+                "schema",
+                "table",
+                "added",
+                "dropped",
+                "dry run",
+            ]
+            rows = [
+                [
+                    result.name,
+                    result.source,
+                    result.destination,
+                    result.mode,
+                    f"{result.rows_read:,}",
+                    f"{result.rows_written:,}",
+                    str(result.batches),
+                    "yes" if result.schema_created else "no",
+                    "yes" if result.table_created else "no",
+                    ", ".join(result.columns_added) or "-",
+                    ", ".join(result.columns_dropped) or "-",
+                    "yes" if result.dry_run else "no",
+                ]
+                for result in results
+            ]
+
+        self.verbose_stream.write(f"\nSyncDB summary ({self.verbose})\n")
+        self._write_table(headers, rows)
+        self.verbose_stream.write(
+            f"total: {sum(result.rows_written for result in results):,} rows "
+            f"in {sum(result.batches for result in results):,} batches "
+            f"across {len(results):,} tables\n"
+        )
+        self.verbose_stream.flush()
+
+    def _write_table(self, headers: list[str], rows: list[list[str]]) -> None:
+        """Render a small ASCII table to the configured verbose stream.
+
+        Keeping this formatter local avoids a runtime dependency for one reporting
+        feature, and ASCII output remains readable in Windows terminals, CI logs,
+        and redirected files.
+        """
+        widths = [
+            max(len(header), *(len(row[index]) for row in rows)) if rows else len(header)
+            for index, header in enumerate(headers)
+        ]
+        separator = "+" + "+".join("-" * (width + 2) for width in widths) + "+\n"
+        header_line = "| " + " | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)) + " |\n"
+        self.verbose_stream.write(separator)
+        self.verbose_stream.write(header_line)
+        self.verbose_stream.write(separator)
+        for row in rows:
+            self.verbose_stream.write(
+                "| " + " | ".join(value.ljust(widths[index]) for index, value in enumerate(row)) + " |\n"
+            )
+        self.verbose_stream.write(separator)

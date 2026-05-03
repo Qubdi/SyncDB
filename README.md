@@ -35,6 +35,7 @@ SyncDB copies data from a **source** (database table or file) to a **destination
 - Chunking large tables into batches so you never load millions of rows into memory at once
 - Translating data types between engines (e.g. PostgreSQL `boolean` → MSSQL `bit`)
 - Showing a live progress bar while data moves
+- Returning structured sync results and optionally printing a final summary table
 
 A 5-minute transfer job looks like this:
 
@@ -301,7 +302,7 @@ Use this when you want to keep adding new rows **and** keep existing rows up to 
 }
 ```
 
-### `insert_only` — Pure Append, Never Touch Existing Rows *(planned)*
+### `insert_only` — Pure Append, Never Touch Existing Rows
 
 Inserts every source row without checking for duplicates. Existing target rows are never deleted or updated.
 
@@ -367,7 +368,7 @@ You can sync many tables in a single call. SyncDB opens the source and target co
 | --- | --- | --- |
 | `source` | yes | Source table name: `"schema.table"` or `"table"` |
 | `destination` | yes | Target table name: `"schema.table"` or `"table"` |
-| `mode` | no | Transfer mode: `"append"`, `"full_refresh"`, `"append_staging"`. Default: `"append"` |
+| `mode` | no | Transfer mode: `"append"`, `"insert_only"`, `"full_refresh"`, `"append_staging"`. Default: `"append"` |
 | `primary_key` | no | Override PK columns. Auto-detected from source schema when omitted |
 | `order_by` | no | Column(s) to sort source reads for deterministic batching |
 | `filter` | no | Restrict which source rows are read (see [Filtering Data](#filtering-data)) |
@@ -576,7 +577,7 @@ When a total row count is available (SELECT COUNT(*) succeeds), the bar shows pe
 
 ## Reading Sync Results
 
-`sync_tables` returns a list of `TableSyncResult` objects — one per table in the spec. The easiest way to see results is the `verbose` parameter *(planned — see [Planned & Proposed Features](#planned--proposed-features))*:
+`sync_tables` returns a list of `TableSyncResult` objects — one per table in the spec. The easiest way to see results is the `verbose` parameter:
 
 ```python
 # prints a formatted summary table automatically when the sync finishes
@@ -587,7 +588,7 @@ results = sync.sync_tables({
 })
 ```
 
-Until `verbose` is available you can inspect the returned list directly:
+You can also inspect the returned list directly:
 
 ```python
 sync = SyncDB(source=src, target=dst)
@@ -846,6 +847,8 @@ SyncDB(
     progress_mode: ProgressMode | str = ProgressMode.multi_line,
     dry_run: bool = False,
     drop_extra_columns: bool = False,
+    verbose: str | None = None,
+    verbose_stream: TextIO | None = None,
 )
 ```
 
@@ -857,6 +860,8 @@ SyncDB(
 | `progress_mode` | Progress display mode | `MULTI_LINE` |
 | `dry_run` | Report changes without writing data | `False` |
 | `drop_extra_columns` | Drop target columns not in source | `False` |
+| `verbose` | Optional final summary: `"standard"`, `"detailed"`, or `None` | `None` |
+| `verbose_stream` | Output stream for verbose summaries | `sys.stdout` |
 
 ### `SyncDB.sync_tables(tables)`
 
@@ -933,50 +938,35 @@ See [Tests/DataBase/README.md](Tests/DataBase/README.md) for details on test dat
 
 ## Planned & Proposed Features
 
-### In Progress
+### Added from the roadmap
 
-- **`append_staging` mode** — bulk-load rows into a temporary staging table, then rename it over the live target atomically. Zero downtime, clean rollback on failure.
+These proposed items are now available:
 
-- **`insert_only` mode** — pure append with no duplicate checking. For immutable event logs and audit tables.
-
----
-
-### On the Roadmap
-
-#### 1. Lowercase `ProgressMode` members
-
-Rename enum members from `ONE_LINE / MULTI_LINE / NONE` to `one_line / multi_line / none` so they follow Python conventions and match the string values you already pass.
+- **`insert_only` mode** — pure append with no duplicate checking. Existing target rows are never deleted or updated, even when a primary key is supplied.
+- **Lowercase `ProgressMode` aliases** — `ProgressMode.one_line`, `ProgressMode.multi_line`, and `ProgressMode.none` now work alongside the original uppercase members.
+- **Automatic summary reporting** — pass `verbose="standard"` or `verbose="detailed"` to print a final table after `sync_tables` completes.
 
 ```python
-# today
-sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.one_line)
-
-# after rename — identical, no migration needed
-sync = SyncDB(source=src, target=dst, progress_mode="one_line")
-```
-
----
-
-#### 2. Automatic summary reporting (`verbose` parameter)
-
-A `verbose` parameter on `SyncDB` that prints a formatted summary automatically after `sync_tables` completes — no manual `for r in results: print(...)` needed.
-
-```python
-sync = SyncDB(source=src, target=dst, verbose="standard")
+sync = SyncDB(
+    source=src,
+    target=dst,
+    progress_mode=ProgressMode.one_line,
+    verbose="standard",
+)
 results = sync.sync_tables({...})
 # prints automatically:
 #
-# ┌──────────────┬───────────────┬─────────┬──────────┐
-# │ table        │  rows written │ batches │ created  │
-# ├──────────────┼───────────────┼─────────┼──────────┤
-# │ orders       │        52,341 │      11 │ no       │
-# │ customers    │         8,200 │       2 │ yes      │
-# │ order_lines  │       104,820 │      21 │ no       │
-# └──────────────┴───────────────┴─────────┴──────────┘
-# total: 165,361 rows in 34 batches — 4.2s
+# +-------------+--------+--------------+---------+---------+
+# | table       | mode   | rows written | batches | created |
+# +-------------+--------+--------------+---------+---------+
+# | orders      | append | 52,341       | 11      | no      |
+# | customers   | append | 8,200        | 2       | yes     |
+# | order_lines | append | 104,820      | 21      | no      |
+# +-------------+--------+--------------+---------+---------+
+# total: 165,361 rows in 34 batches across 3 tables
 ```
 
-Three levels:
+Verbose levels:
 
 | `verbose=` | Output |
 | --- | --- |
@@ -986,11 +976,18 @@ Three levels:
 
 ---
 
-#### 3. More transfer modes (Airbyte-style)
+### In Progress
+
+- **`append_staging` mode** — bulk-load rows into a temporary staging table, then rename it over the live target atomically. Zero downtime, clean rollback on failure.
+
+---
+
+### On the Roadmap
+
+#### 1. More transfer modes (Airbyte-style)
 
 | Planned mode | Airbyte equivalent | Description |
 | --- | --- | --- |
-| `insert_only` | Incremental \| Append | Pure append, never touch existing rows |
 | `upsert` | Incremental \| Append + Dedup | SQL MERGE — more efficient than delete + insert for large PKs |
 | `snapshot` | Full Refresh \| Append | Append all rows each run with a `_synced_at` timestamp column, building a full history |
 | `soft_delete` | — | Sync a `deleted_at` column instead of removing rows from target |

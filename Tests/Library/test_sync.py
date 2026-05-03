@@ -18,6 +18,13 @@ class MemoryConnector(BaseConnector):
         self.connected = True
 
     def execute_query(self, query, params=None):
+        # Minimal query support for export tests.  This is intentionally small:
+        # the production connectors own SQL execution; the memory connector only
+        # needs to return rows for simple "SELECT ... FROM table" fixtures.
+        lowered = query.lower()
+        for (_schema, table), rows in self.rows_by_table.items():
+            if f" from {table.lower()}" in lowered:
+                return [dict(row) for row in rows]
         return []
 
     def fetch_batches(self, schema, table, columns=None, where="", params=None, order_by="", batch_size=5000):
@@ -145,6 +152,85 @@ class SyncDBTests(unittest.TestCase):
         self.assertEqual(result.rows_written, 1)
         self.assertEqual(target.truncated, [(None, "orders")])
         self.assertEqual(target.rows_by_table[(None, "orders")], [{"id": 10}])
+
+    def test_insert_only_keeps_existing_rows_even_with_primary_key(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={
+                ("dbo", "events"): [
+                    {"id": 1, "message": "duplicate fact"},
+                    {"id": 2, "message": "new fact"},
+                ]
+            },
+            columns_by_table={
+                ("dbo", "events"): [
+                    Column("id", "int", nullable=False, is_primary_key=True),
+                    Column("message", "nvarchar", char_length=100),
+                ]
+            },
+        )
+        target = MemoryConnector(
+            "postgresql",
+            "public",
+            rows_by_table={("public", "events"): [{"id": 1, "message": "existing fact"}]},
+            columns_by_table={
+                ("public", "events"): [
+                    Column("id", "integer", nullable=False, is_primary_key=True),
+                    Column("message", "varchar", char_length=100),
+                ]
+            },
+        )
+        sync = _make_sync(source, target)
+
+        result = sync.sync_tables(
+            {
+                "events": {
+                    "source": "dbo.events",
+                    "destination": "public.events",
+                    "mode": "insert_only",
+                    "primary_key": ["id"],
+                }
+            }
+        )[0]
+
+        self.assertEqual(result.mode, "insert_only")
+        self.assertEqual(result.rows_written, 2)
+        self.assertEqual(
+            target.rows_by_table[("public", "events")],
+            [
+                {"id": 1, "message": "existing fact"},
+                {"id": 1, "message": "duplicate fact"},
+                {"id": 2, "message": "new fact"},
+            ],
+        )
+
+    def test_verbose_standard_prints_summary_after_sync(self):
+        import io
+
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "customers"): [{"id": 1}, {"id": 2}]},
+            columns_by_table={("dbo", "customers"): [Column("id", "int", is_primary_key=True)]},
+        )
+        target = MemoryConnector("postgresql", "public")
+        stream = io.StringIO()
+        sync = _make_sync(source, target, verbose="standard", verbose_stream=stream)
+
+        sync.sync_tables({"customers": {"source": "dbo.customers", "destination": "public.customers"}})
+
+        output = stream.getvalue()
+        self.assertIn("SyncDB summary (standard)", output)
+        self.assertIn("public.customers", output)
+        self.assertIn("total: 2 rows in 1 batches across 1 tables", output)
+
+    def test_invalid_verbose_mode_is_rejected(self):
+        source = MemoryConnector("mssql", "dbo")
+        target = MemoryConnector("postgresql", "public")
+
+        with self.assertRaises(ValueError):
+            _make_sync(source, target, verbose="chatty")
 
     def test_dry_run_reports_schema_changes_without_writing(self):
         source = MemoryConnector(

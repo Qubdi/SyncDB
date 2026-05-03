@@ -17,6 +17,11 @@ class ProgressReporterTests(unittest.TestCase):
         self.assertIn("50%", output[0])
         self.assertIn("100%", output[1])
 
+    def test_lowercase_progress_mode_aliases_match_string_values(self):
+        self.assertIs(ProgressMode.one_line, ProgressMode.ONE_LINE)
+        self.assertIs(ProgressMode.multi_line, ProgressMode.MULTI_LINE)
+        self.assertIs(ProgressMode.none, ProgressMode.NONE)
+
     def test_one_line_progress_uses_carriage_return_and_finish_newline(self):
         stream = io.StringIO()
         reporter = ProgressReporter(ProgressMode.ONE_LINE, width=10, stream=stream)

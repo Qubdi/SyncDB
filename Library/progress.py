@@ -16,8 +16,11 @@ from typing import TextIO
 
 class ProgressMode(str, Enum):
     ONE_LINE = "one_line"
+    one_line = "one_line"
     MULTI_LINE = "multi_line"
+    multi_line = "multi_line"
     NONE = "none"
+    none = "none"
 
 
 class ProgressReporter:
