@@ -49,6 +49,7 @@ class ProgressReporter:
     ) -> None:
         self.mode = ProgressMode(mode)
         self.width = width
+        self.label_width: int = 0
         # Allow callers to inject a custom stream for testing or log capture.
         self.stream = stream or sys.stdout
         # Tracks whether a \r-terminated line is waiting for a terminal newline.
@@ -109,9 +110,10 @@ class ProgressReporter:
         the connector lacks SELECT COUNT(*) permission; see SyncDB._safe_source_count).
         Format: label  [=======>...........]  45%  4,500 / 10,000  1.2s
         """
+        padded_label = f"{label:<{self.label_width}}" if self.label_width else label
         elapsed_str = f"  {_format_elapsed(elapsed)}" if elapsed is not None else ""
         if not total or total <= 0:
-            return f"{label}  {current:,} rows{elapsed_str}"
+            return f"{padded_label}  {current:,} rows{elapsed_str}"
         ratio = min(max(current / total, 0.0), 1.0)
         if ratio >= 1.0:
             bar = "=" * self.width
@@ -119,12 +121,15 @@ class ProgressReporter:
             filled = int(self.width * ratio)
             bar = "=" * filled + ">" + "." * (self.width - filled - 1)
         percent = int(ratio * 100)
-        return f"{label}  [{bar}]  {percent:3d}%  {current:>10,} / {total:,}{elapsed_str}"
+        return f"{padded_label}  [{bar}]  {percent:3d}%  {current:>10,} / {total:,}{elapsed_str}"
 
 
 def _format_elapsed(seconds: float) -> str:
-    """Format a duration as '1.2s' or '1m 2.3s'."""
+    """Format a duration as '1.2s', '1m 2.3s', or '1h 3m 4.5s'."""
     if seconds < 60:
         return f"{seconds:.1f}s"
     m, s = divmod(seconds, 60)
-    return f"{int(m)}m {s:.1f}s"
+    if m < 60:
+        return f"{int(m)}m {s:.1f}s"
+    h, m = divmod(m, 60)
+    return f"{int(h)}h {int(m)}m {s:.1f}s"

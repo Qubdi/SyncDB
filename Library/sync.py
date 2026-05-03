@@ -155,6 +155,7 @@ class SyncDB:
         # Both are closed unconditionally in `finally` even if a table sync raises.
         self.source.connect()
         self.target.connect()
+        self.progress.label_width = max((len(spec.get("destination", "")) for spec in tables.values()), default=0)
         try:
             for name, spec in tables.items():
                 # Per-table batch_size in the spec wins; method-level batch_size fills
