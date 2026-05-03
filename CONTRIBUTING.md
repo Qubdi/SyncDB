@@ -44,7 +44,7 @@ SyncDB/
 ├── Current/                   # Legacy scripts (pre-refactor, kept for reference)
 ├── run_tests.ps1              # Manual test runner (PowerShell)
 ├── pyproject.toml             # Package metadata and setuptools config
-├── requirements.txt           # Full dev dependency set
+├── requirements.txt           # Pinned optional runtime dependency set
 ├── README.md                  # User-facing documentation
 └── CONTRIBUTING.md            # This file
 ```
@@ -66,16 +66,17 @@ python -m venv .venv
 source .venv/bin/activate
 
 # 3. Install the package in editable mode with all dev dependencies
-pip install -e .
-pip install -r requirements.txt
+pip install -e ".[dev]"
 
 # 4. Enable the pre-push git hook (runs tests before every push)
 git config core.hooksPath .githooks
 ```
 
-The `pip install -e .` step is required. It maps the `Library/` directory to the
-`syncdb` package name via the `[tool.setuptools.package-dir]` config in
-`pyproject.toml`. Without it, `import syncdb` will fail.
+The `pip install -e ".[dev]"` step is required. The distribution package is
+named `Qubdi-SyncDB`, while the Python import package remains `syncdb`.
+`pyproject.toml` maps the `Library/` directory to that import package via
+`[tool.setuptools.package-dir]`. Without installation, `import syncdb` will fail
+outside the repository root.
 
 Step 4 activates the pre-push hook stored in `.githooks/pre-push`. It runs the
 full test suite before every `git push` and blocks the push if any test fails.

@@ -1,6 +1,6 @@
 # SyncDB
 
-Python ETL helper for moving tabular data between **Microsoft SQL Server**, **PostgreSQL**, **MySQL**, and **local files** (CSV, Parquet, Excel, Pickle) — with automatic schema creation, schema evolution, and batch progress reporting.
+Python ETL helper for moving tabular data between **Microsoft SQL Server**, **PostgreSQL**, **MySQL**, and **local files** (CSV, Parquet, Excel, Pickle), with automatic schema creation, schema evolution, and batch progress reporting.
 
 ---
 
@@ -34,7 +34,7 @@ SyncDB copies data from a **source** (database table or file) to a **destination
 - Creating the destination table if it does not exist
 - Adding or dropping columns when the schema changes
 - Chunking large tables into batches so you never load millions of rows into memory at once
-- Translating data types between engines (e.g. PostgreSQL `boolean` → MSSQL `bit`)
+- Translating data types between engines (e.g. PostgreSQL `boolean` to MSSQL `bit`)
 - Showing a live progress bar while data moves
 - Returning structured sync results and optionally printing a final summary table
 
@@ -63,11 +63,29 @@ That is all you need. SyncDB creates the `public.orders` table if it does not ex
 
 ## Installation
 
+After the package is published to PyPI:
+
+```bash
+pip install Qubdi-SyncDB
+```
+
+Install only the database connectors and file formats you actually need:
+
+```bash
+pip install "Qubdi-SyncDB[mssql]"       # MSSQL / SQL Server
+pip install "Qubdi-SyncDB[postgres]"    # PostgreSQL
+pip install "Qubdi-SyncDB[mysql]"       # MySQL / MariaDB
+pip install "Qubdi-SyncDB[files]"       # Parquet + Excel (requires pandas)
+pip install "Qubdi-SyncDB[all]"         # Everything
+```
+
+For local development from this repository:
+
 ```bash
 pip install -e .
 ```
 
-Install only the database connectors and file formats you actually need:
+Or with extras:
 
 ```bash
 pip install -e ".[mssql]"       # MSSQL / SQL Server
@@ -77,7 +95,13 @@ pip install -e ".[files]"       # Parquet + Excel (requires pandas)
 pip install -e ".[all]"         # Everything
 ```
 
-> **CSV and Pickle** work without any extras — they use Python's standard library.
+> **CSV and Pickle** work without any extras; they use Python's standard library.
+
+The distribution name is `Qubdi-SyncDB`. The Python import name stays lowercase:
+
+```python
+from syncdb import DatabaseConfig, SyncDB
+```
 
 ---
 

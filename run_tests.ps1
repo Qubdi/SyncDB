@@ -1,9 +1,10 @@
 # Usage:
-#   .\run_tests.ps1              — run all tests
-#   .\run_tests.ps1 sync         — run a specific suite
-#   .\run_tests.ps1 sync -v      — run with verbose output
+#   .\run_tests.ps1              - run all tests
+#   .\run_tests.ps1 sync         - run a specific suite
+#   .\run_tests.ps1 sync -v      - run with verbose output
 #
 # Available suites: config, connectors, files, progress, sql, sync, type_mapping
+# Prerequisite from repo root: pip install -e ".[dev]"
 
 param(
     [string]$Suite = "all",
