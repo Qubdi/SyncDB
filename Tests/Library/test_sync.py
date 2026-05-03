@@ -104,6 +104,7 @@ class MemoryConnector(BaseConnector):
 
 
 def _make_sync(source, target, **kwargs) -> "SyncDB":
+    kwargs.setdefault("verbose", None)
     return SyncDB(source_connector=source, target_connector=target, progress_mode=ProgressMode.NONE, **kwargs)
 
 
@@ -488,7 +489,7 @@ class SyncDBTests(unittest.TestCase):
             rows_by_table={("dbo", "t"): [{"id": 1}, {"id": 2}]},
             columns_by_table={("dbo", "t"): [Column("id", "int")]},
         )
-        sync = SyncDB(source_connector=source, progress_mode=ProgressMode.NONE)
+        sync = SyncDB(source_connector=source, progress_mode=ProgressMode.NONE, verbose=None)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "out.csv"
@@ -500,7 +501,7 @@ class SyncDBTests(unittest.TestCase):
         import io
 
         target = MemoryConnector("postgresql", "public")
-        sync = SyncDB(target_connector=target, progress_mode=ProgressMode.NONE)
+        sync = SyncDB(target_connector=target, progress_mode=ProgressMode.NONE, verbose=None)
 
         csv_content = "id,name\n1,Ana\n2,Gio\n"
         import tempfile

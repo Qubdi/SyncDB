@@ -85,7 +85,7 @@ class SyncDB:
         self,
         source: DatabaseConfig | BaseConnector | None = None,
         target: DatabaseConfig | BaseConnector | None = None,
-        batch_size: int = 5000,
+        batch_size: int | str = 5000,
         progress_mode: ProgressMode | str = ProgressMode.MULTI_LINE,
         dry_run: bool = False,
         drop_extra_columns: bool = False,
@@ -93,13 +93,12 @@ class SyncDB:
         target_connector: BaseConnector | None = None,
         schema_mapper: SchemaMapper | None = None,
         file_transfer: FileTransfer | None = None,
-        verbose: str | None = None,
+        verbose: str | None = "standard",
         verbose_stream: TextIO | None = None,
         retry_count: int = 0,
         retry_delay_seconds: float = 1.0,
     ) -> None:
-        if batch_size <= 0:
-            raise ValueError("batch_size must be greater than zero")
+        self.batch_size, self._batch_pct = self._parse_batch_size(batch_size)
         if retry_count < 0:
             raise ValueError("retry_count must be zero or greater")
         if retry_delay_seconds < 0:
@@ -108,7 +107,6 @@ class SyncDB:
         # are supplied, allowing callers to inject test doubles without refactoring.
         self.source = source_connector or self._coerce_connector(source)
         self.target = target_connector or self._coerce_connector(target)
-        self.batch_size = batch_size
         self.progress = ProgressReporter(progress_mode)
         self.dry_run = dry_run
         # False by default: extra target columns are left untouched to avoid
@@ -233,21 +231,24 @@ class SyncDB:
 
     def export_query_to_file(
         self,
-        query: str,
+        query: str | Path,
         output_path: str | Path,
         params: Sequence[Any] | None = None,
         file_format: str | None = None,
     ) -> int:
         """Execute a source query and write its rows to a local file.
 
+        query can be a SQL string or a path to a .sql file — the file is read
+        and its contents used as the query string.
         Returns the number of rows written.  file_format overrides extension-based
         detection when the output path's suffix is ambiguous or missing.
         """
         if self.source is None:
             raise ValueError("source connector/config is required for export")
+        query_str = self._resolve_query(query)
         self.source.connect()
         try:
-            rows = self.source.execute_query(query, params or [])
+            rows = self.source.execute_query(query_str, params or [])
         finally:
             self.source.close()
         return self.file_transfer.write(rows, output_path, file_format)
@@ -333,6 +334,7 @@ class SyncDB:
             filter_sql, params = self._apply_watermark_filter(filter_sql, params, watermark_cfg["column"], watermark_cfg["value"])
         order_sql = build_order_by(spec.get("order_by"), self.source.quote_char)
         total = self._safe_source_count(source_name.schema, source_name.table, filter_sql, params)
+        batch_size = self._resolve_batch_size(total)
         column_names = [column.name for column in source_columns]
         target_column_names = [column.name for column in target_columns]
         # Prefer an explicit primary_key list from the spec; fall back to columns
@@ -352,7 +354,7 @@ class SyncDB:
                 where=filter_sql,
                 params=params,
                 order_by=order_sql,
-                batch_size=self.batch_size,
+                batch_size=batch_size,
             ):
                 if watermark_cfg:
                     result.watermark_value = self._max_value(result.watermark_value, raw_batch, watermark_cfg["column"])
@@ -688,6 +690,37 @@ class SyncDB:
             columns.append(Column(name=name, data_type=data_type, nullable=True))
         # bool check must come before int because bool is a subclass of int in Python.
         return self.schema_mapper.map_columns(columns, "postgresql", self.target.engine)
+
+    @staticmethod
+    def _parse_batch_size(batch_size: int | str) -> tuple[int, float | None]:
+        """Parse batch_size — accepts an integer count or a percentage string like '10%'."""
+        if isinstance(batch_size, str):
+            stripped = batch_size.strip()
+            if not stripped.endswith("%"):
+                raise ValueError("batch_size string must be a percentage like '10%'")
+            pct = float(stripped[:-1])
+            if not (0 < pct <= 100):
+                raise ValueError("batch_size percentage must be between 0 and 100")
+            return 5000, pct / 100
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero")
+        return batch_size, None
+
+    def _resolve_batch_size(self, total: int | None) -> int:
+        """Return the effective batch size, resolving a percentage against the total row count."""
+        if self._batch_pct is None:
+            return self.batch_size
+        if total and total > 0:
+            return max(1, int(total * self._batch_pct))
+        return self.batch_size
+
+    @staticmethod
+    def _resolve_query(query: str | Path) -> str:
+        """Return the SQL string — reading it from a .sql file when a path is given."""
+        path = Path(query)
+        if path.suffix.lower() == ".sql" and path.exists():
+            return path.read_text(encoding="utf-8")
+        return str(query)
 
     def _coerce_connector(self, value: DatabaseConfig | BaseConnector | None) -> BaseConnector | None:
         """Accept DatabaseConfig, a ready-made connector, or None."""

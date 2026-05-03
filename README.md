@@ -104,7 +104,7 @@ target = DatabaseConfig(
 
 sync = SyncDB(source=source, target=target, batch_size=10_000)
 
-results = sync.sync_tables({
+sync.sync_tables({
     "orders": {
         "source": "dbo.orders",
         "destination": "public.orders",
@@ -113,30 +113,41 @@ results = sync.sync_tables({
         "order_by": ["order_id"],
     }
 })
-
-for r in results:
-    print(f"{r.destination}: {r.rows_written:,} rows written")
+# SyncDB prints a summary automatically:
+#
+# SyncDB summary (standard)
+# +-----------------+--------+--------------+---------+---------+
+# | table           | mode   | rows written | batches | created |
+# +-----------------+--------+--------------+---------+---------+
+# | public.orders   | append | 52,341       | 11      | no      |
+# +-----------------+--------+--------------+---------+---------+
+# total: 52,341 rows in 11 batches across 1 tables
 ```
 
 ### Export a query result to a Parquet file
 
 ```python
-rows = sync.export_query_to_file(
+# Pass a SQL string directly
+sync.export_query_to_file(
     query="SELECT * FROM dbo.orders WHERE status = 'shipped'",
     output_path="shipped_orders.parquet",
 )
-print(f"Exported {rows:,} rows")
+
+# Or point to a .sql file on disk
+sync.export_query_to_file(
+    query="queries/shipped_orders.sql",
+    output_path="shipped_orders.parquet",
+)
 ```
 
 ### Load a file into a database table
 
 ```python
-rows = sync.import_file_to_table(
+sync.import_file_to_table(
     input_path="shipped_orders.parquet",
     destination="public.shipped_orders",
     fresh_insert=True,   # truncate before inserting
 )
-print(f"Inserted {rows:,} rows")
 ```
 
 ---
@@ -147,9 +158,14 @@ print(f"Inserted {rows:,} rows")
 
 SyncDB never loads an entire table into memory. It reads `batch_size` rows at a time from the source, writes them to the target, then reads the next batch. The default is 5,000 rows. Raise it for fast networks with plenty of RAM; lower it for slow connections or wide rows.
 
+`batch_size` accepts either an integer count or a percentage string. A percentage is resolved against the total row count before the first batch is read — useful when you want each batch to represent a fixed share of the table regardless of its size.
+
 ```python
-sync = SyncDB(source=src, target=dst, batch_size=50_000)
+sync = SyncDB(source=src, target=dst, batch_size=50_000)   # fixed count
+sync = SyncDB(source=src, target=dst, batch_size="10%")    # 10% of total rows per batch
 ```
+
+When a percentage is given but the total row count cannot be determined (for example, due to missing `SELECT COUNT(*)` permission), SyncDB falls back to the default of 5,000 rows.
 
 ### Automatic Table Creation
 
@@ -171,14 +187,9 @@ Pass `dry_run=True` to see what SyncDB *would* do without writing any data. Sche
 ```python
 sync = SyncDB(source=src, target=dst, dry_run=True)
 results = sync.sync_tables({"orders": {"source": "dbo.orders", "destination": "public.orders"}})
-
-for r in results:
-    if r.columns_added:
-        print(f"Would add columns: {r.columns_added}")
-    if r.columns_dropped:
-        print(f"Would drop columns: {r.columns_dropped}")
-    if r.table_created:
-        print(f"Would create table: {r.destination}")
+# SyncDB prints a summary of what would change. To also inspect results in code:
+r = results[0]
+# r.columns_added, r.columns_dropped, r.table_created are populated even in dry_run mode
 ```
 
 ---
@@ -497,10 +508,8 @@ results = sync.sync_tables({
         "mode": "append",
     }
 })
-
-for r in results:
-    if r.columns_added:
-        print(f"Added columns: {r.columns_added}")   # ['loyalty_tier']
+# SyncDB prints a summary automatically. To inspect the result in code:
+added = results[0].columns_added   # ['loyalty_tier']
 ```
 
 ### Example: Dropping extra columns
@@ -520,27 +529,32 @@ SyncDB can export query results to local files and import files into database ta
 ### Export: Database → File
 
 ```python
-# Export a query to Parquet
-rows = sync.export_query_to_file(
+# Export a query string to Parquet
+sync.export_query_to_file(
     query="SELECT * FROM dbo.orders WHERE status = 'shipped'",
     output_path="exports/shipped_orders.parquet",
 )
-print(f"Exported {rows:,} rows")
+
+# Or point to a .sql file — its contents are read and executed
+sync.export_query_to_file(
+    query="queries/shipped_orders.sql",
+    output_path="exports/shipped_orders.parquet",
+)
 
 # Export to CSV
-rows = sync.export_query_to_file(
+sync.export_query_to_file(
     query="SELECT customer_id, email FROM dbo.customers",
     output_path="customers.csv",
 )
 
 # Export to Excel
-rows = sync.export_query_to_file(
+sync.export_query_to_file(
     query="SELECT * FROM dbo.summary",
     output_path="summary.xlsx",
 )
 
 # With query parameters (prevents SQL injection)
-rows = sync.export_query_to_file(
+sync.export_query_to_file(
     query="SELECT * FROM dbo.orders WHERE region = ? AND year = ?",
     params=["US", 2024],
     output_path="us_orders_2024.parquet",
@@ -553,18 +567,17 @@ Output parent directories are created automatically — no need to `mkdir` befor
 
 ```python
 # Load a Parquet file into PostgreSQL (append by default)
-rows = sync.import_file_to_table(
+sync.import_file_to_table(
     input_path="exports/shipped_orders.parquet",
     destination="public.shipped_orders",
 )
 
 # Truncate first, then load
-rows = sync.import_file_to_table(
+sync.import_file_to_table(
     input_path="customers.csv",
     destination="public.customers",
     fresh_insert=True,
 )
-print(f"Inserted {rows:,} rows")
 ```
 
 If the target table does not exist, SyncDB creates it using column types inferred from the first row of data.
@@ -800,21 +813,19 @@ Use `verbose="detailed"` for a full row with every `TableSyncResult` field, incl
 | `"detailed"` | Full table with all `TableSyncResult` fields including schema changes, watermark, and check results |
 | `None` | Silent — return results only, print nothing |
 
-You can also inspect the returned list directly:
+The returned list is also useful for programmatic checks — for example, wiring results into a monitoring system or raising an alert when new tables are created:
 
 ```python
-sync = SyncDB(source=src, target=dst)
 results = sync.sync_tables({
     "orders":    {"source": "dbo.orders",    "destination": "public.orders"},
     "customers": {"source": "dbo.customers", "destination": "public.customers"},
 })
 
 for r in results:
-    print(f"{r.destination}: {r.rows_written:,} rows in {r.batches} batches")
     if r.table_created:
-        print(f"  → table created")
+        alert(f"New table created: {r.destination}")
     if r.columns_added:
-        print(f"  → added columns: {r.columns_added}")
+        notify_schema_change(r.destination, r.columns_added)
 ```
 
 ### All `TableSyncResult` fields
@@ -893,9 +904,7 @@ results = sync.sync_tables({
     },
 })
 
-for r in results:
-    status = "created" if r.table_created else f"{r.rows_written:,} rows"
-    print(f"{r.name}: {status}")
+# SyncDB prints a summary table automatically
 ```
 
 ### Example 2: Preview schema changes before applying them
@@ -916,15 +925,10 @@ results = sync.sync_tables({
     }
 })
 
-for r in results:
-    if r.table_created:
-        print(f"[DRY RUN] Would CREATE table: {r.destination}")
-    if r.columns_added:
-        print(f"[DRY RUN] Would ADD columns: {', '.join(r.columns_added)}")
-    if r.columns_dropped:
-        print(f"[DRY RUN] Would DROP columns: {', '.join(r.columns_dropped)}")
-    if not any([r.table_created, r.columns_added, r.columns_dropped]):
-        print(f"[DRY RUN] No schema changes for: {r.destination}")
+# SyncDB prints a [DRY RUN] summary automatically.
+# Inspect results in code if needed:
+r = results[0]
+# r.table_created, r.columns_added, r.columns_dropped are populated
 ```
 
 ### Example 3: Export filtered data to Parquet, then reload into a second database
@@ -945,12 +949,11 @@ sync_export.export_query_to_file(
 
 # Step 2: load the file into PostgreSQL
 sync_load = SyncDB(target=pg_cfg)
-rows = sync_load.import_file_to_table(
+sync_load.import_file_to_table(
     input_path="daily_report_2024_12_31.parquet",
     destination="public.daily_report",
     fresh_insert=False,   # append to existing rows
 )
-print(f"Loaded {rows:,} rows into PostgreSQL")
 ```
 
 ### Example 4: MySQL to PostgreSQL with column drop
@@ -1015,10 +1018,11 @@ ft.write(rows, "data.xlsx")
 rows = ft.read("orders.parquet")
 active = [r for r in rows if r["status"] == "active"]
 ft.write(active, "active_orders.csv")
-print(f"Wrote {len(active):,} active orders")
 ```
 
-### Example 6: Silent sync inside a script with custom logging
+### Example 6: Routing results to a custom logger
+
+Pass `verbose=None` to suppress the built-in summary table and `progress_mode=ProgressMode.none` to suppress the progress bar. Then use the returned `results` list to feed your own logger or monitoring system.
 
 ```python
 import logging
@@ -1030,7 +1034,12 @@ log = logging.getLogger("etl")
 src = DatabaseConfig(engine="mssql", connection_string="...")
 dst = DatabaseConfig(engine="postgresql", connection_string="...")
 
-sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.none)
+sync = SyncDB(
+    source=src,
+    target=dst,
+    verbose=None,                    # suppress built-in summary
+    progress_mode=ProgressMode.none, # suppress progress bar
+)
 
 results = sync.sync_tables({
     "invoices": {
@@ -1058,11 +1067,11 @@ for r in results:
 SyncDB(
     source: DatabaseConfig | None = None,
     target: DatabaseConfig | None = None,
-    batch_size: int = 5000,
+    batch_size: int | str = 5000,
     progress_mode: ProgressMode | str = ProgressMode.multi_line,
     dry_run: bool = False,
     drop_extra_columns: bool = False,
-    verbose: str | None = None,
+    verbose: str | None = "standard",
     verbose_stream: TextIO | None = None,
     retry_count: int = 0,
     retry_delay_seconds: float = 1.0,
@@ -1073,12 +1082,12 @@ SyncDB(
 | --- | --- | --- |
 | `source` | Source database config | `None` |
 | `target` | Target database config | `None` |
-| `batch_size` | Rows per read/write batch | `5000` |
+| `batch_size` | Rows per batch — integer count (`10_000`) or percentage of total rows (`"10%"`) | `5000` |
 | `progress_mode` | Progress display mode | `MULTI_LINE` |
 | `dry_run` | Report changes without writing data | `False` |
 | `drop_extra_columns` | Drop target columns not in source | `False` |
-| `verbose` | Optional final summary: `"standard"`, `"detailed"`, or `None` | `None` |
-| `verbose_stream` | Output stream for verbose summaries | `sys.stdout` |
+| `verbose` | Automatic summary after sync: `"standard"`, `"detailed"`, or `None` to silence | `"standard"` |
+| `verbose_stream` | Output stream for the summary table | `sys.stdout` |
 | `retry_count` | Retry failed batch writes this many times | `0` |
 | `retry_delay_seconds` | Initial retry delay; doubles after each retry | `1.0` |
 
@@ -1118,7 +1127,7 @@ Loads a `.json`, `.yaml`, or `.yml` job file with `source`, `target`, `settings`
 
 ```python
 sync.export_query_to_file(
-    query: str,
+    query: str | Path,             # SQL string or path to a .sql file
     output_path: str | Path,
     params: list | None = None,
     file_format: str | None = None,   # inferred from extension when omitted
