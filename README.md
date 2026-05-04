@@ -1269,7 +1269,7 @@ pytest
 To inspect each test and see live SyncDB progress/summary output:
 
 ```bash
-pytest Tests/Library/sync --syncdb-live-output
+pytest Tests/Library/Components/sync --syncdb-live-output
 ```
 
 On Windows you can use the helper script:
@@ -1283,8 +1283,13 @@ Integration tests against real databases require Docker:
 ```bash
 cd Tests/DataBase
 docker compose up -d --build
-pytest
+cd ../..
+pytest Tests/Library/DatabaseToDatabase
 ```
+
+Database-to-database integration tests are shared across database pairs. Set
+`SYNCDB_LIVE_SCENARIOS=postgresql_to_mysql` or a comma-separated list of scenario
+ids from `Tests/Library/DatabaseToDatabase/parameters.py` to choose the pairs.
 
 See [Tests/DataBase/README.md](Tests/DataBase/README.md) for details on test database setup.
 

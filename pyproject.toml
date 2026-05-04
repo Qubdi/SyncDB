@@ -44,11 +44,12 @@ packages = ["syncdb", "syncdb.connectors", "syncdb.pipelines"]
 
 [tool.pytest.ini_options]
 testpaths = [
-    "Tests/Library/config",
-    "Tests/Library/connectors",
-    "Tests/Library/files",
-    "Tests/Library/progress",
-    "Tests/Library/sql",
-    "Tests/Library/sync",
-    "Tests/Library/type_mapping",
+    "Tests/Library/Components/config",
+    "Tests/Library/Components/connectors",
+    "Tests/Library/Components/files",
+    "Tests/Library/Components/progress",
+    "Tests/Library/Components/sql",
+    "Tests/Library/Components/sync",
+    "Tests/Library/Components/type_mapping",
+    "Tests/Library/DatabaseToDatabase",
 ]

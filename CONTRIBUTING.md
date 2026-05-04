@@ -103,12 +103,13 @@ Run a specific suite (faster feedback while working on one module):
 .\run_tests.ps1 sync -live    # show each test plus SyncDB progress/summary output
 
 # or call pytest directly
-pytest Tests/Library/sync
-pytest Tests/Library/sync -v -k "upsert"   # filter by test name
-pytest Tests/Library/sync --syncdb-live-output
+pytest Tests/Library/Components/sync
+pytest Tests/Library/Components/sync -v -k "upsert"   # filter by test name
+pytest Tests/Library/Components/sync --syncdb-live-output
+pytest Tests/Library/DatabaseToDatabase                 # live Docker DB tests
 ```
 
-Available suites: `config`, `connectors`, `files`, `progress`, `sql`, `sync`, `type_mapping`
+Available suites: `config`, `connectors`, `files`, `progress`, `sql`, `sync`, `type_mapping`, `db`
 
 Use `-live` / `--syncdb-live-output` when debugging workflows such as batched
 table movement. It forces verbose pytest output, disables output capture, and

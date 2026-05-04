@@ -4,7 +4,7 @@
 #   .\run_tests.ps1 sync -v      - run with verbose output
 #   .\run_tests.ps1 sync -live   - show each test plus SyncDB progress/summary output
 #
-# Available suites: config, connectors, files, progress, sql, sync, type_mapping
+# Available suites: config, connectors, files, progress, sql, sync, type_mapping, db
 # Prerequisite from repo root: pip install -e ".[dev]"
 
 param(
@@ -14,13 +14,14 @@ param(
 )
 
 $suites = @{
-    config       = "Tests/Library/config"
-    connectors   = "Tests/Library/connectors"
-    files        = "Tests/Library/files"
-    progress     = "Tests/Library/progress"
-    sql          = "Tests/Library/sql"
-    sync         = "Tests/Library/sync"
-    type_mapping = "Tests/Library/type_mapping"
+    config       = "Tests/Library/Components/config"
+    connectors   = "Tests/Library/Components/connectors"
+    files        = "Tests/Library/Components/files"
+    progress     = "Tests/Library/Components/progress"
+    sql          = "Tests/Library/Components/sql"
+    sync         = "Tests/Library/Components/sync"
+    type_mapping = "Tests/Library/Components/type_mapping"
+    db           = "Tests/Library/DatabaseToDatabase"
 }
 
 $pytest_args = @()
