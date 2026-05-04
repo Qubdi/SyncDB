@@ -121,7 +121,7 @@ class ProgressReporter:
             filled = int(self.width * ratio)
             bar = "=" * filled + ">" + "." * (self.width - filled - 1)
         percent = int(ratio * 100)
-        return f"{padded_label}  [{bar}]  {percent:3d}%  {current:>10,} / {total:,}{elapsed_str}"
+        return f"{padded_label}  [{bar}]  {percent:3d}%  {current:>10,} / {total:>10,}{elapsed_str}"
 
 
 def _format_elapsed(seconds: float) -> str:

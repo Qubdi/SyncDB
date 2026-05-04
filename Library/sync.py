@@ -178,6 +178,8 @@ class SyncDB:
         exclude: Sequence[str] | None = None,
         mode: str = TransferMode.APPEND.value,
         batch_size: int | str | None = None,
+        table_prefix: str = "",
+        table_suffix: str = "",
         **table_defaults: Any,
     ) -> list[TableSyncResult]:
         """Synchronize every table in a source schema.
@@ -186,6 +188,9 @@ class SyncDB:
         values like ["tmp_*", "audit_log"].  table_defaults are copied into every
         generated table spec, letting callers set mode, batch options, or expect
         rules once for the whole schema.
+
+        table_prefix and table_suffix are applied to destination table names only,
+        e.g. table_prefix="raw_" turns "orders" into "raw_orders".
 
         batch_size overrides the instance-level batch_size for every table in this
         schema sync.  A per-table "batch_size" key inside table_defaults takes
@@ -203,7 +208,11 @@ class SyncDB:
             name: {
                 **table_defaults,
                 "source": f"{source_schema}.{name}" if source_schema else name,
-                "destination": f"{destination_schema}.{name}" if destination_schema else name,
+                "destination": (
+                    f"{destination_schema}.{table_prefix}{name}{table_suffix}"
+                    if destination_schema
+                    else f"{table_prefix}{name}{table_suffix}"
+                ),
                 "mode": mode,
             }
             for name in names
@@ -343,6 +352,10 @@ class SyncDB:
         target_columns = self._apply_column_options(target_columns, rename_map, spec.get("type_overrides"))
         if mode == TransferMode.SNAPSHOT:
             target_columns = self._ensure_system_column(target_columns, "_synced_at", self._timestamp_type())
+            # Snapshot tables accumulate one row per run per source row, so the same
+            # primary key will appear on every sync. Strip PK constraints so the target
+            # table is created without a unique index that would block repeat inserts.
+            target_columns = [replace(col, is_primary_key=False) for col in target_columns]
         if mode == TransferMode.SOFT_DELETE:
             target_columns = self._ensure_system_column(target_columns, "deleted_at", self._timestamp_type())
         self._sync_schema(target_name.schema, target_name.table, target_columns, result)

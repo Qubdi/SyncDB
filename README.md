@@ -1167,7 +1167,7 @@ Syncs one or more tables. Opens connections once, reuses them for all tables, al
 
 `batch_size` overrides the instance-level default for every table in this call. A `"batch_size"` key inside an individual table spec takes precedence over this argument.
 
-### `SyncDB.sync_schema(source_schema, destination_schema, exclude, mode, batch_size, **table_defaults)`
+### `SyncDB.sync_schema(source_schema, destination_schema, exclude, mode, batch_size, table_prefix, table_suffix, **table_defaults)`
 
 ```python
 sync.sync_schema(
@@ -1175,12 +1175,33 @@ sync.sync_schema(
     destination_schema="public",
     exclude=["tmp_*", "audit_log"],
     mode="append",
-    batch_size=10_000,           # optional — overrides instance default for this call
-    expect={"not_null": ["id"]}, # extra kwargs are copied into every table spec
+    batch_size=10_000,            # optional — overrides instance default for this call
+    table_prefix="raw_",          # prepend to every destination table name
+    table_suffix="_v2",           # append to every destination table name
+    expect={"not_null": ["id"]},  # extra kwargs are copied into every table spec
 )
 ```
 
 Discovers source tables through the connector and builds a `sync_tables` spec automatically. `batch_size` overrides the instance-level default for every table in this schema sync. Extra keyword arguments are copied into every generated table spec.
+
+`table_prefix` and `table_suffix` are applied only to destination table names. Both default to `""` so existing calls are unaffected.
+
+| Parameter | Description | Default |
+| --- | --- | --- |
+| `table_prefix` | String prepended to every destination table name | `""` |
+| `table_suffix` | String appended to every destination table name | `""` |
+
+```python
+# dbo.customers  →  public.raw_customers
+# dbo.orders     →  public.raw_orders
+sync.sync_schema("dbo", "public", table_prefix="raw_", mode="full_refresh")
+
+# dbo.customers  →  public.customers_20250101
+sync.sync_schema("dbo", "public", table_suffix="_20250101", mode="snapshot")
+
+# dbo.customers  →  public.raw_customers_backup
+sync.sync_schema("dbo", "public", table_prefix="raw_", table_suffix="_backup")
+```
 
 ### `SyncDB.run_config_file(path)`
 

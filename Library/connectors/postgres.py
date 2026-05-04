@@ -32,8 +32,16 @@ class PostgresConnector(BaseConnector):
             return
         try:
             import psycopg2
+            import psycopg2.extensions
+            import psycopg2.extras
         except ImportError as exc:
             raise ImportError("psycopg2 is required for PostgreSQL connections") from exc
+        # psycopg2 reads JSONB/JSON dict columns as Python dicts but has no built-in
+        # adapter to serialize them back. Register dict → Json so INSERT/UPDATE of
+        # JSONB object values works transparently.
+        # Lists are intentionally left to psycopg2's native ListAdapter, which
+        # produces PostgreSQL array syntax ({a,b,c}) required for text[], int[], etc.
+        psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
         if self.config.connection_string:
             # psycopg2 accepts libpq connection strings or DSNs directly.
             # connect_timeout is passed as a separate kwarg because some DSN
