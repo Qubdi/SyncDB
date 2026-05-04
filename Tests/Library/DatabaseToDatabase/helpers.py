@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import unittest
 
 from syncdb import ProgressMode, SyncDB
 from syncdb.connections import create_connector
 from syncdb.sql import quote_identifier
+from Tests.Library.test_env import live_output_enabled, live_progress_mode, live_verbose
 
 from .parameters import DatabaseScenario, enabled_scenarios
 
@@ -52,18 +52,16 @@ def parameterized_filter(scenario: DatabaseScenario, where: str, params: list[ob
 
 
 def make_sync(scenario: DatabaseScenario, **kwargs) -> SyncDB:
-    detail_output = bool(os.getenv("SYNCDB_TEST_LIVE_OUTPUT_DETAIL"))
-    verbose = os.getenv("SYNCDB_TEST_VERBOSE") if detail_output else None
-    progress = os.getenv("SYNCDB_TEST_PROGRESS_MODE", ProgressMode.NONE)
+    detail = live_output_enabled()
     sync = SyncDB(
         source=scenario.source.config,
         target=scenario.target.config,
-        progress_mode=progress,
-        verbose=verbose,
-        verbose_stream=sys.__stdout__ if detail_output else None,
+        progress_mode=live_progress_mode(),
+        verbose=live_verbose(),
+        verbose_stream=sys.__stdout__ if detail else None,
         **kwargs,
     )
-    if detail_output:
+    if detail:
         sync.progress.stream = sys.__stdout__
     return sync
 

@@ -12,65 +12,22 @@ import json
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any, TextIO
 
-from .config import DatabaseConfig
-from .connections import create_connector
-from .connectors.base import BaseConnector
-from .files import FileTransfer
-from .progress import ProgressMode, ProgressReporter, _format_elapsed
-from .sql import build_order_by, build_where_clause, parse_qualified_name, quote_identifier, validate_identifier
-from .type_mapping import Column, SchemaMapper
-
-
-class TransferMode(str, Enum):
-    # Upsert-style: delete-then-insert for rows that match on primary key,
-    # append new rows.  Safe for incremental loads where source rows may be updated.
-    APPEND = "append"
-    # Pure append: insert every source row as-is and never delete/update existing
-    # target rows.  Useful for immutable event streams, audit logs, and history tables.
-    INSERT_ONLY = "insert_only"
-    # Explicit upsert mode.  Today it uses the same portable delete+insert strategy
-    # as APPEND; connector-native MERGE/ON CONFLICT optimisations can replace this later.
-    UPSERT = "upsert"
-    # Append every source row with a _synced_at timestamp for historical snapshots.
-    SNAPSHOT = "snapshot"
-    # Upsert active source rows, then mark target rows missing from the source with deleted_at.
-    SOFT_DELETE = "soft_delete"
-    # Portable staging load: write all source rows to a staging table first, then
-    # replace the live target contents from staging in a final step.
-    APPEND_STAGING = "append_staging"
-    # Truncate the target before loading.  Suitable for full daily refreshes.
-    FULL_REFRESH = "full_refresh"
-
-
-@dataclass
-class TableSyncResult:
-    """Runtime statistics and schema-change summary for one synced table.
-
-    Returned by SyncDB.sync_tables so callers can audit what happened without
-    parsing log output.  dry_run=True means no data or DDL was actually applied.
-    """
-    name: str
-    source: str
-    destination: str
-    mode: str
-    rows_read: int = 0
-    rows_written: int = 0
-    rows_soft_deleted: int = 0
-    batches: int = 0
-    schema_created: bool = False
-    table_created: bool = False
-    columns_added: list[str] = field(default_factory=list)
-    columns_dropped: list[str] = field(default_factory=list)
-    expectations_failed: list[str] = field(default_factory=list)
-    watermark_value: Any = None
-    dry_run: bool = False
-    duration_seconds: float = 0.0
+from ..config import DatabaseConfig
+from ..connections import create_connector
+from ..connectors.base import BaseConnector
+from ..files import FileTransfer
+from ..progress import ProgressMode, ProgressReporter
+from ..sql import build_order_by, build_where_clause, parse_qualified_name, validate_identifier
+from ..type_mapping import Column, SchemaMapper
+from . import watermark as wm
+from .models import TableSyncResult, TransferMode
+from .quality import validate_expectations
+from .reporting import emit_summary
 
 
 class SyncDB:
@@ -168,7 +125,7 @@ class SyncDB:
             self.progress.finish()
             self.source.close()
             self.target.close()
-        self._emit_summary(results)
+        emit_summary(results, self.verbose, self.verbose_stream)
         return results
 
     def sync_schema(
@@ -323,12 +280,7 @@ class SyncDB:
             self.target.close()
 
     def _sync_one_table(self, name: str, spec: dict[str, Any]) -> TableSyncResult:
-        """Synchronize a single table spec and return audited runtime details.
-
-        This is the main workflow body. Keep it readable and policy-oriented:
-        parse the spec, align schema, stream batches, then apply optional modes
-        such as staging, snapshots, soft deletes, watermarks, and expectations.
-        """
+        """Synchronize a single table spec and return audited runtime details."""
         _t0 = time.monotonic()
         if "source" not in spec or "destination" not in spec:
             raise ValueError(f"Table spec '{name}' must include source and destination")
@@ -381,9 +333,13 @@ class SyncDB:
             self.target.truncate_table(target_name.schema, target_name.table)
 
         filter_sql, params = build_where_clause(spec.get("filter"))
-        watermark_cfg = self._load_watermark(spec)
+        watermark_cfg = wm.load_watermark(spec)
         if watermark_cfg:
-            filter_sql, params = self._apply_watermark_filter(filter_sql, params, watermark_cfg["column"], watermark_cfg["value"])
+            filter_sql, params = wm.apply_watermark_filter(
+                filter_sql, params,
+                watermark_cfg["column"], watermark_cfg["value"],
+                self.source.quote_char, self.source.placeholder,
+            )
         order_sql = build_order_by(spec.get("order_by"), self.source.quote_char)
         total = self._safe_source_count(source_name.schema, source_name.table, filter_sql, params)
         batch_size = self._resolve_batch_size(total, spec.get("batch_size"))
@@ -410,7 +366,7 @@ class SyncDB:
                 batch_size=batch_size,
             ):
                 if watermark_cfg:
-                    result.watermark_value = self._max_value(result.watermark_value, raw_batch, watermark_cfg["column"])
+                    result.watermark_value = wm.max_watermark_value(result.watermark_value, raw_batch, watermark_cfg["column"])
                 batch = self._prepare_batch(raw_batch, rename_map, transform, target_column_names, mode, snapshot_ts)
                 if not batch:
                     continue
@@ -448,8 +404,8 @@ class SyncDB:
                     seen_keys,
                 )
             if watermark_cfg and result.watermark_value is not None:
-                self._save_watermark(watermark_cfg, result.watermark_value)
-            self._validate_expectations(target_name.schema, target_name.table, spec.get("expect"), result)
+                wm.save_watermark(watermark_cfg, result.watermark_value)
+            validate_expectations(self.target, target_name.schema, target_name.table, spec.get("expect"), result, self.batch_size)
         finally:
             if staging_table:
                 self.target.drop_table(target_name.schema, staging_table)
@@ -562,7 +518,7 @@ class SyncDB:
             prepared.append({column: mapped.get(column) for column in target_columns})
         return prepared
 
-    def _with_retries(self, operation):
+    def _with_retries(self, operation: Any) -> Any:
         """Run a database write operation with simple exponential backoff."""
         attempt = 0
         while True:
@@ -614,132 +570,6 @@ class SyncDB:
             return 0
         deleted_at = datetime.now(timezone.utc).isoformat()
         return self._with_retries(lambda: self.target.update_matching_rows(schema, table, missing, primary_key, {"deleted_at": deleted_at}))
-
-    def _load_watermark(self, spec: dict[str, Any]) -> dict[str, Any] | None:
-        """Load incremental-sync state for a table spec, if configured."""
-        column = spec.get("incremental_column")
-        store = spec.get("watermark_store")
-        if not column:
-            return None
-        validate_identifier(column)
-        path = Path(store or ".syncdb_watermarks.json")
-        key = spec.get("watermark_key") or f"{spec['source']}->{spec['destination']}:{column}"
-        values = self._read_watermark_file(path)
-        return {"path": path, "key": key, "column": column, "value": values.get(key)}
-
-    def _read_watermark_file(self, path: Path) -> dict[str, Any]:
-        """Read the JSON watermark store, returning an empty mapping when absent."""
-        if not path.exists():
-            return {}
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, dict) else {}
-
-    def _save_watermark(self, config: dict[str, Any], value: Any) -> None:
-        """Persist the latest processed incremental value after a successful sync.
-
-        CONSISTENCY NOTE: _max_value() updates the in-memory watermark value as each
-        batch is streamed, but _save_watermark() is only called after ALL batches
-        complete without error.  If the sync fails mid-stream, the watermark file is
-        NOT updated — the next run re-reads from the last persisted value, which means
-        some rows near the watermark boundary will be re-processed.  This is an
-        at-least-once delivery guarantee, NOT exactly-once.  Target tables should be
-        idempotent (i.e. APPEND/UPSERT mode) when using incremental sync to tolerate
-        duplicate rows arriving from the overlap window.
-        """
-        path: Path = config["path"]
-        values = self._read_watermark_file(path)
-        values[config["key"]] = value.isoformat() if hasattr(value, "isoformat") else value
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(values, handle, indent=2, sort_keys=True)
-
-    def _apply_watermark_filter(
-        self,
-        where_sql: str,
-        params: list[Any],
-        column: str,
-        value: Any,
-    ) -> tuple[str, list[Any]]:
-        """Append an incremental-column predicate to an existing WHERE clause."""
-        if value in {None, ""}:
-            return where_sql, params
-        condition = f"{quote_identifier(column, self.source.quote_char)} > {self.source.placeholder}"
-        if not where_sql:
-            return f" WHERE {condition} ", [*params, value]
-        existing = where_sql.strip()
-        if existing.upper().startswith("WHERE "):
-            existing = existing[6:].strip()
-        return f" WHERE ({existing}) AND ({condition}) ", [*params, value]
-
-    def _max_value(self, current: Any, rows: list[dict[str, Any]], column: str) -> Any:
-        """Track the maximum non-null watermark value seen across fetched batches."""
-        values = [row.get(column) for row in rows if row.get(column) is not None]
-        if not values:
-            return current
-        batch_max = max(values)
-        if current is None or batch_max > current:
-            return batch_max
-        return current
-
-    def _validate_expectations(
-        self,
-        schema: str | None,
-        table: str,
-        expect: dict[str, Any] | None,
-        result: TableSyncResult,
-    ) -> None:
-        """Run optional data-quality checks after a table sync.
-
-        PERFORMANCE NOTE: All target rows are fetched into memory for checking.
-        This is intentionally simple and suitable for tables up to a few million rows.
-        For very large tables, consider running expectations via a separate SQL-based
-        monitoring job (e.g. dbt tests, Great Expectations) rather than loading all
-        rows into Python.  The `expect` block is best used as a lightweight sanity
-        check, not a full data-quality framework.
-        """
-        if not expect:
-            return
-        rows = [row for batch in self.target.fetch_batches(schema, table, batch_size=self.batch_size) for row in batch]
-        failures: list[str] = []
-        min_rows = expect.get("min_rows")
-        if min_rows is not None and len(rows) < int(min_rows):
-            failures.append(f"expected at least {min_rows} rows, found {len(rows)}")
-        for column in expect.get("not_null", []) or []:
-            validate_identifier(column)
-            null_count = sum(1 for row in rows if row.get(column) is None)
-            if null_count:
-                failures.append(f"{column} has {null_count} null values")
-        for key in expect.get("unique", []) or []:
-            columns = [key] if isinstance(key, str) else list(key)
-            for column in columns:
-                validate_identifier(column)
-            seen = set()
-            duplicates = 0
-            for row in rows:
-                value = tuple(row.get(column) for column in columns)
-                if value in seen:
-                    duplicates += 1
-                seen.add(value)
-            if duplicates:
-                failures.append(f"{', '.join(columns)} has {duplicates} duplicate rows")
-        for column, bounds in (expect.get("range") or {}).items():
-            validate_identifier(column)
-            minimum = bounds.get("min")
-            maximum = bounds.get("max")
-            for row in rows:
-                value = row.get(column)
-                if value is None:
-                    continue
-                if minimum is not None and value < minimum:
-                    failures.append(f"{column} has value below {minimum}: {value}")
-                    break
-                if maximum is not None and value > maximum:
-                    failures.append(f"{column} has value above {maximum}: {value}")
-                    break
-        result.expectations_failed = failures
-        if failures:
-            raise ValueError(f"Data quality checks failed for {result.destination}: " + "; ".join(failures))
 
     def _safe_source_count(
         self,
@@ -852,99 +682,3 @@ class SyncDB:
         if value in {"standard", "detailed"}:
             return value
         raise ValueError("verbose must be one of: None, 'standard', 'detailed'")
-
-    def _emit_summary(self, results: list[TableSyncResult]) -> None:
-        """Print a final sync summary when verbose mode is enabled.
-
-        The method receives completed TableSyncResult objects only.  If a sync
-        raises before finishing, Python propagates the exception after the finally
-        cleanup block in sync_tables, so no misleading partial summary is printed.
-        """
-        if self.verbose is None:
-            return
-        if self.verbose == "standard":
-            headers = ["table", "mode", "rows written", "batches", "created", "time"]
-            rows = [
-                [
-                    result.destination,
-                    result.mode,
-                    f"{result.rows_written:,}",
-                    str(result.batches),
-                    "yes" if result.table_created else "no",
-                    _format_elapsed(result.duration_seconds),
-                ]
-                for result in results
-            ]
-        else:
-            headers = [
-                "name",
-                "source",
-                "destination",
-                "mode",
-                "read",
-                "written",
-                "soft deleted",
-                "batches",
-                "schema",
-                "table",
-                "added",
-                "dropped",
-                "checks",
-                "watermark",
-                "dry run",
-                "time",
-            ]
-            rows = [
-                [
-                    result.name,
-                    result.source,
-                    result.destination,
-                    result.mode,
-                    f"{result.rows_read:,}",
-                    f"{result.rows_written:,}",
-                    f"{result.rows_soft_deleted:,}",
-                    str(result.batches),
-                    "yes" if result.schema_created else "no",
-                    "yes" if result.table_created else "no",
-                    ", ".join(result.columns_added) or "-",
-                    ", ".join(result.columns_dropped) or "-",
-                    "fail" if result.expectations_failed else "ok",
-                    str(result.watermark_value) if result.watermark_value is not None else "-",
-                    "yes" if result.dry_run else "no",
-                    _format_elapsed(result.duration_seconds),
-                ]
-                for result in results
-            ]
-
-        total_duration = sum(r.duration_seconds for r in results)
-        self.verbose_stream.write(f"\nSyncDB summary ({self.verbose})\n")
-        self._write_table(headers, rows)
-        self.verbose_stream.write(
-            f"total: {sum(result.rows_written for result in results):,} rows "
-            f"in {sum(result.batches for result in results):,} batches "
-            f"across {len(results):,} tables "
-            f"in {_format_elapsed(total_duration)}\n"
-        )
-        self.verbose_stream.flush()
-
-    def _write_table(self, headers: list[str], rows: list[list[str]]) -> None:
-        """Render a small ASCII table to the configured verbose stream.
-
-        Keeping this formatter local avoids a runtime dependency for one reporting
-        feature, and ASCII output remains readable in Windows terminals, CI logs,
-        and redirected files.
-        """
-        widths = [
-            max(len(header), *(len(row[index]) for row in rows)) if rows else len(header)
-            for index, header in enumerate(headers)
-        ]
-        separator = "+" + "+".join("-" * (width + 2) for width in widths) + "+\n"
-        header_line = "| " + " | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)) + " |\n"
-        self.verbose_stream.write(separator)
-        self.verbose_stream.write(header_line)
-        self.verbose_stream.write(separator)
-        for row in rows:
-            self.verbose_stream.write(
-                "| " + " | ".join(value.ljust(widths[index]) for index, value in enumerate(row)) + " |\n"
-            )
-        self.verbose_stream.write(separator)

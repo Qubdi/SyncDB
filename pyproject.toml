@@ -12,35 +12,37 @@ license = { text = "Apache-2.0" }
 dependencies = []
 
 [project.optional-dependencies]
-mssql      = ["pyodbc==5.3.0"]
-postgres   = ["psycopg2-binary==2.9.11"]
-mysql      = ["mysql-connector-python==9.7.0"]
-files      = ["pandas==2.3.3", "pyarrow==24.0.0", "openpyxl==3.1.5"]
+mssql      = ["pyodbc>=5.0"]
+postgres   = ["psycopg2-binary>=2.9"]
+mysql      = ["mysql-connector-python>=9.0"]
+files      = ["pandas>=2.0", "pyarrow>=14.0", "openpyxl>=3.1"]
 all        = [
-    "pyodbc==5.3.0",
-    "psycopg2-binary==2.9.11",
-    "mysql-connector-python==9.7.0",
-    "pandas==2.3.3",
-    "pyarrow==24.0.0",
-    "openpyxl==3.1.5",
+    "pyodbc>=5.0",
+    "psycopg2-binary>=2.9",
+    "mysql-connector-python>=9.0",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "openpyxl>=3.1",
 ]
 dev        = [
-    "pyodbc==5.3.0",
-    "psycopg2-binary==2.9.11",
-    "mysql-connector-python==9.7.0",
-    "pandas==2.3.3",
-    "pyarrow==24.0.0",
-    "openpyxl==3.1.5",
-    "pytest==8.4.2",
+    "pyodbc>=5.0",
+    "psycopg2-binary>=2.9",
+    "mysql-connector-python>=9.0",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "openpyxl>=3.1",
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
 ]
 
 [tool.setuptools]
-packages = ["syncdb", "syncdb.connectors", "syncdb.pipelines"]
+packages = ["syncdb", "syncdb.connectors", "syncdb.sync"]
 
 [tool.setuptools.package-dir]
 "syncdb"            = "Library"
 "syncdb.connectors" = "Library/connectors"
-"syncdb.pipelines"  = "Library/pipelines"
+"syncdb.sync"       = "Library/sync"
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -53,3 +55,26 @@ testpaths = [
     "Tests/Library/Components/type_mapping",
     "Tests/Library/DatabaseToDatabase",
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # line too long — enforced by formatter, not linter
+    "B008",   # function calls in default arguments (needed for Enum defaults)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"Tests/**" = ["E402", "F401", "F811"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["Tests/"]

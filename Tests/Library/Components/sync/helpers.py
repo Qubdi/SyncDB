@@ -1,7 +1,6 @@
-import os
-
 from syncdb import Column, DatabaseConfig, ProgressMode, SyncDB
 from syncdb.connectors.base import BaseConnector
+from Tests.Library.test_env import live_output_enabled, live_progress_mode, live_verbose
 
 
 class MemoryConnector(BaseConnector):
@@ -166,19 +165,10 @@ class MemoryConnector(BaseConnector):
         self.columns_by_table.pop((schema, table), None)
 
 
-def _live_output_enabled() -> bool:
-    return os.getenv("SYNCDB_TEST_LIVE_OUTPUT_DETAIL", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _live_progress_mode() -> ProgressMode:
-    value = os.getenv("SYNCDB_TEST_PROGRESS_MODE", ProgressMode.MULTI_LINE.value)
-    return ProgressMode(value)
-
-
 def make_sync(source, target, **kwargs) -> SyncDB:
-    if _live_output_enabled():
-        kwargs.setdefault("verbose", os.getenv("SYNCDB_TEST_VERBOSE", "standard"))
-        progress_mode = kwargs.pop("progress_mode", _live_progress_mode())
+    if live_output_enabled():
+        kwargs.setdefault("verbose", live_verbose() or "standard")
+        progress_mode = kwargs.pop("progress_mode", live_progress_mode())
     else:
         kwargs.setdefault("verbose", None)
         progress_mode = kwargs.pop("progress_mode", ProgressMode.NONE)
