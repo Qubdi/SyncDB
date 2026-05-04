@@ -1,7 +1,7 @@
 project = "SyncDB"
 copyright = "2024, Qubdi Solutions"
 author = "Qubdi Solutions"
-release = "0.1.0"
+release = "1.0.0"
 
 extensions = [
     "sphinx.ext.autodoc",

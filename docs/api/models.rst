@@ -34,7 +34,7 @@ Values
      - Truncate target once, then insert all source rows
    * - ``TransferMode.APPEND_STAGING``
      - ``"append_staging"``
-     - Load into staging table, then swap into live table
+     - Load into staging table, then truncate live table and copy from staging
    * - ``TransferMode.SNAPSHOT``
      - ``"snapshot"``
      - Append all rows with a ``_synced_at`` timestamp column
@@ -45,7 +45,7 @@ Values
 TableSyncResult
 ---------------
 
-Dataclass returned by :meth:`~syncdb.SyncDB.sync_tables` for each table. All fields are read-only.
+Dataclass returned by :meth:`~syncdb.SyncDB.sync_tables` for each table.
 
 .. autoclass:: syncdb.TableSyncResult
    :members:

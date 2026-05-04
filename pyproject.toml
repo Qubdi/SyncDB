@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Qubdi-SyncDB"
-version = "0.1.0"
+version = "1.0.0"
 description = "ETL helper for moving tabular data between MSSQL, PostgreSQL, MySQL, and local files"
 readme = "README.md"
 requires-python = ">=3.10"

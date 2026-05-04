@@ -14,13 +14,13 @@ SyncDB prints a progress bar as data moves between source and target.
 from syncdb import ProgressMode, SyncDB
 
 # Interactive terminal
-sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.one_line)
+sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.ONE_LINE)
 
 # CI pipeline
-sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.multi_line)
+sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.MULTI_LINE)
 
 # No progress output
-sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.none)
+sync = SyncDB(source=src, target=dst, progress_mode=ProgressMode.NONE)
 
 # String values are also accepted
 sync = SyncDB(source=src, target=dst, progress_mode="one_line")
@@ -97,7 +97,7 @@ sync = SyncDB(
     source=src,
     target=dst,
     verbose=None,
-    progress_mode=ProgressMode.none,
+    progress_mode=ProgressMode.NONE,
 )
 
 results = sync.sync_tables({...})

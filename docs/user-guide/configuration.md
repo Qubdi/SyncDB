@@ -36,7 +36,7 @@ mysql = DatabaseConfig(
 # SQLite (for testing)
 sqlite = DatabaseConfig(
     engine="sqlite",
-    connection_string="mydb.sqlite3",
+    database="mydb.sqlite3",
 )
 ```
 
@@ -96,7 +96,7 @@ sync = SyncDB(
     source=src,           # DatabaseConfig or None
     target=dst,           # DatabaseConfig or None
     batch_size=5_000,     # int or "10%" percentage string
-    progress_mode=ProgressMode.multi_line,
+    progress_mode=ProgressMode.MULTI_LINE,
     dry_run=False,
     drop_extra_columns=False,
     verbose="standard",   # "standard", "detailed", or None
@@ -165,6 +165,8 @@ pg = DatabaseConfig(
 ## Loading a job from a config file
 
 For scheduled or CLI-driven jobs, store the full configuration in a YAML or JSON file and use `SyncDB.run_config_file`:
+
+> **Note:** YAML support requires `pyyaml`, which is not bundled with SyncDB. Either `pip install pyyaml` or use a `.json` file instead — JSON works with no extra dependencies.
 
 ```yaml
 # syncdb.yaml

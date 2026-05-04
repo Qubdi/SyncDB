@@ -66,5 +66,5 @@ brew install microsoft/mssql-release/msodbcsql18
 
 ```python
 import syncdb
-print(syncdb.__version__)   # 0.1.0
+print(syncdb.__version__)   # 1.0.0
 ```

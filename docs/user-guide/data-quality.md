@@ -82,19 +82,18 @@ Fails if any value in a column falls outside the specified bounds. Both `min` an
 
 ## Reading check results
 
-Failed checks raise `ValueError` immediately and are also recorded in the result:
+When a check fails, `sync_tables` raises `ValueError` and does not return. The exception message contains the full failure detail. `results` is not available in the `except` block:
 
 ```python
 try:
     results = sync.sync_tables({...})
 except ValueError as e:
+    # sync_tables raised before returning — inspect the exception message directly.
     print(f"Quality check failed: {e}")
-
-# Inspect results for detail even after failure
-for r in results:
-    if r.expectations_failed:
-        for msg in r.expectations_failed:
-            print(msg)
+else:
+    # No checks failed; all results are available.
+    for r in results:
+        print(r.destination, r.rows_written)
 ```
 
 ## Combining checks with incremental sync

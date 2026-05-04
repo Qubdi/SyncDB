@@ -10,7 +10,7 @@ The `mode` key in a table spec controls how SyncDB handles existing rows in the 
 | `insert_only` | No | Never | Append-only event/log tables |
 | `upsert` | Yes — upsert by PK | Per-batch delete before insert | Explicit upsert semantics |
 | `full_refresh` | Replaces everything | Truncate once at start | Small lookup/reference tables |
-| `append_staging` | Replaces everything | Staging → live swap | Safer full-table reloads |
+| `append_staging` | Replaces everything | Truncate + copy from staging | Safer full-table reloads |
 | `snapshot` | No | Never | Historical snapshots with `_synced_at` |
 | `soft_delete` | Yes | Marks missing rows as deleted | Tables with `deleted_at` lifecycle |
 
@@ -82,9 +82,9 @@ Use `full_refresh` for **small lookup or reference tables** where a complete rel
 
 ## `append_staging` — Load through a staging table
 
-Bulk-loads all rows into a temporary staging table, then replaces the live table's contents from staging. The live table remains untouched while the source is being read.
+Writes all rows into a temporary staging table (`__syncdb_<table>_staging`), then truncates the live table and copies all rows from staging. The live table is untouched while the source is being read; the cutover is a TRUNCATE followed by a bulk copy, not an atomic swap.
 
-Use `append_staging` when you need a **safer full reload** that keeps the live table consistent during the transfer.
+Use `append_staging` when you need a **safer full reload** that avoids partial writes to the live table during the transfer.
 
 ---
 

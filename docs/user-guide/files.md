@@ -9,7 +9,7 @@ SyncDB can export query results to local files and import files into database ta
 | CSV | `.csv` | none | Values are strings; no type inference |
 | Parquet | `.parquet` | `pandas`, `pyarrow` | Preserves types; best for large data |
 | Excel | `.xlsx`, `.xls` | `pandas`, `openpyxl` | Human-readable; slow for large files |
-| Pickle | `.pickle` | none | Python-only; not portable |
+| Pickle | `.pickle` | none | Python-only; not portable. **Security warning: loading a Pickle file executes arbitrary Python bytecode — never load files from untrusted sources.** |
 
 Install file extras:
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — Initial release
+## 1.0.0 — Initial release
 
 - Database-to-database sync: MSSQL, PostgreSQL, MySQL, SQLite
 - File operations: export query to CSV/Parquet/Excel/Pickle, import file to table

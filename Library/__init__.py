@@ -37,7 +37,8 @@ DatabaseConfig is a frozen dataclass and is safe to share across threads.
 SyncDB instances are NOT thread-safe; create one per thread/task.
 """
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
+
 try:
     __version__ = version("Qubdi-SyncDB")
 except PackageNotFoundError:

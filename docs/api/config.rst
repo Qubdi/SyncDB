@@ -46,12 +46,6 @@ Parameters
    * - ``connect_timeout``
      - ``30``
      - Seconds before a connection attempt fails
-   * - ``pool_min``
-     - ``1``
-     - Minimum connection pool size
-   * - ``pool_max``
-     - ``5``
-     - Maximum connection pool size
    * - ``options``
      - ``{}``
      - Extra driver-specific keyword arguments
