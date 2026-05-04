@@ -61,7 +61,9 @@ cd SyncDB
 # 2. Create and activate a virtual environment
 python -m venv .venv
 # Windows
-.venv\Scripts\activate
+.venv/Scripts/activate
+# Git Bash
+source .venv/Scripts/activate
 # macOS / Linux
 source .venv/bin/activate
 

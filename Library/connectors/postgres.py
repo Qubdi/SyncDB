@@ -139,6 +139,8 @@ class PostgresConnector(BaseConnector):
         if (data_type or "").upper() == "ARRAY":
             element = (udt_name or "").lstrip("_")
             return f"{element}[]" if element else "text[]"
+        if (data_type or "").lower() == "character varying":
+            return "varchar"
         return data_type
 
     def get_primary_keys(self, schema: str | None, table: str) -> list[str]:

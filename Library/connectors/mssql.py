@@ -100,10 +100,12 @@ class MSSQLConnector(BaseConnector):
         query = f"INSERT INTO {self.quote_table(schema, table)} ({column_sql}) VALUES ({placeholders})"
         values = [[row.get(column) for column in columns] for row in records]
         cursor = self.connection.cursor()
-        # fast_executemany sends all rows to the server in a single network round-trip
-        # using the TVP (table-valued parameter) protocol; typically 5-10x faster than
-        # the default row-by-row executemany for large batches.
-        cursor.fast_executemany = True
+        # pyodbc fast_executemany can mis-size string buffers for mixed-length
+        # varchar/nvarchar batches and nvarchar(max), raising HY000 truncation or
+        # MemoryError before SQL Server sees the rows. Keep the reliable DB-API
+        # path as the default; callers can opt into the faster path once their
+        # driver/table shape is known to be safe.
+        cursor.fast_executemany = bool(self.config.options.get("fast_executemany", False))
         cursor.executemany(query, values)
         self.connection.commit()
         return len(records)
