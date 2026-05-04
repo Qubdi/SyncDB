@@ -188,7 +188,3 @@ class MSSQLConnector(BaseConnector):
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
 
-    def _column_definition(self, column: Column) -> str:
-        """Build a single column definition fragment for CREATE TABLE / ALTER TABLE."""
-        null_sql = " NULL" if column.nullable else " NOT NULL"
-        return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"

@@ -165,12 +165,12 @@ class BaseConnector(ABC):
         """
         schema_name = schema or self.config.default_schema or self.config.database
         rows = self.execute_query(
-            """
+            f"""
             SELECT table_name
             FROM information_schema.tables
-            WHERE table_schema = {placeholder} AND table_type = 'BASE TABLE'
+            WHERE table_schema = {self.placeholder} AND table_type = 'BASE TABLE'
             ORDER BY table_name
-            """.format(placeholder=self.placeholder),
+            """,
             [schema_name],
         )
         return [row.get("table_name") or row.get("TABLE_NAME") for row in rows]
@@ -242,6 +242,8 @@ class BaseConnector(ABC):
             )
             params.extend(row[column] for column in primary_key)
         query = f"UPDATE {self.quote_table(schema, table)} SET {assignments} WHERE " + " OR ".join(predicates)
+        # SET placeholders are filled first (values.values()), then WHERE predicates (params).
+        # The order must match the left-to-right appearance of placeholders in the query.
         self.execute_query(query, list(values.values()) + params)
         return len(rows)
 
@@ -264,3 +266,12 @@ class BaseConnector(ABC):
     def drop_table(self, schema: str | None, table: str) -> None:
         """Drop a table if it exists."""
         self.execute_query(f"DROP TABLE IF EXISTS {self.quote_table(schema, table)}")
+
+    def _column_definition(self, column: Column) -> str:
+        """Build a single column definition fragment for CREATE TABLE / ALTER TABLE.
+
+        Shared by all connectors; the engine-appropriate quote_char is taken from
+        self.quote_char so subclasses get correct quoting without overriding this method.
+        """
+        null_sql = " NULL" if column.nullable else " NOT NULL"
+        return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"

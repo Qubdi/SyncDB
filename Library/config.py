@@ -88,8 +88,6 @@ class DatabaseConfig:
     password: str | None = None
     default_schema: str | None = None
     connect_timeout: int = 30
-    pool_min: int = 1
-    pool_max: int = 5
     # Engine-specific pass-through options forwarded verbatim to the driver.
     # Common uses per engine:
     #   MSSQL:      {"driver": "{ODBC Driver 18 for SQL Server}", "TrustServerCertificate": "no"}
@@ -113,8 +111,6 @@ class DatabaseConfig:
 
         if self.connect_timeout <= 0:
             raise ValueError("connect_timeout must be greater than zero")
-        if self.pool_min <= 0 or self.pool_max <= 0 or self.pool_min > self.pool_max:
-            raise ValueError("pool_min and pool_max must be positive and pool_min <= pool_max")
 
         # A raw connection_string is accepted as-is; individual credential fields
         # are only required when no connection_string was provided.
@@ -153,10 +149,10 @@ class DatabaseConfig:
         (e.g. psycopg2 for an absent password) don't raise spurious errors.
         Caller-supplied options are merged last so they can override any default.
 
-        NOTE: engine, default_schema, pool_min, and pool_max are intentionally
-        excluded — they are SyncDB concepts and not recognized by any DB driver.
-        PostgreSQL also requires a key rename: "database" → "dbname"; that rename
-        is done in PostgresConnector.connect(), not here.
+        NOTE: engine and default_schema are intentionally excluded — they are
+        SyncDB concepts and not recognized by any DB driver.  PostgreSQL also
+        requires a key rename: "database" → "dbname"; that rename is done in
+        PostgresConnector.connect(), not here.
         """
         kwargs: dict[str, Any] = {
             "host": self.host,

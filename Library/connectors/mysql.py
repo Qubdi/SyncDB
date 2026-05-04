@@ -81,7 +81,7 @@ class MySQLConnector(BaseConnector):
         names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
         cursor = self.connection.cursor()
         cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-        headers = [col[0] for col in cursor.description]
+        headers = [col[0].lower() for col in cursor.description]
         while True:
             rows = cursor.fetchmany(batch_size)
             if not rows:
@@ -180,9 +180,6 @@ class MySQLConnector(BaseConnector):
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
 
-    def _column_definition(self, column: Column) -> str:
-        null_sql = " NULL" if column.nullable else " NOT NULL"
-        return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"
 
     def _connection_kwargs(self) -> dict[str, Any]:
         """Build a kwargs dict from the config, parsing a URL connection string if needed.

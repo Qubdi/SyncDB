@@ -38,6 +38,11 @@ class FileTransfer:
         """Read a file and return its rows as a list of dicts.
 
         file_format overrides extension-based detection when provided.
+
+        SECURITY: Pickle files execute arbitrary Python bytecode on load.
+        Only read pickle files from sources you control.  Never expose this
+        method to user-uploaded files or network-received payloads without
+        prior integrity verification (e.g. an HMAC signature check).
         """
         file_path = Path(path)
         fmt = self._resolve_format(file_path, file_format)
@@ -113,11 +118,6 @@ class FileTransfer:
 
         Accepts a list of mappings (the natural output of connector.execute_query)
         or a pandas DataFrame (common when the pickle was produced by external tools).
-
-        SECURITY: pickle.load() executes arbitrary Python bytecode embedded in
-        the file.  Only load pickle files from sources you control.  Never
-        expose this method to user-uploaded files or network-received payloads
-        without prior integrity verification (e.g. HMAC signature check).
         """
         if isinstance(data, list):
             return [dict(row) for row in data]

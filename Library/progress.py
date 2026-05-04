@@ -20,17 +20,21 @@ from typing import TextIO
 
 
 class ProgressMode(str, Enum):
-    # Each mode has both an UPPER_CASE and lowercase alias so that both
-    #   ProgressMode("ONE_LINE")  and  ProgressMode("one_line")
-    # resolve to the same member.  This matters for YAML/JSON job configs where
-    # the value may be typed in lowercase.  The canonical storage value is
-    # always lowercase (e.g. "one_line") to match the Enum(str) contract.
     ONE_LINE = "one_line"
-    one_line = "one_line"
     MULTI_LINE = "multi_line"
-    multi_line = "multi_line"
     NONE = "none"
-    none = "none"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "ProgressMode | None":
+        # Accept case-insensitive strings so YAML/JSON job configs can use
+        # "ONE_LINE" or "one_line" interchangeably without callers needing to
+        # normalise before constructing the enum.
+        if isinstance(value, str):
+            normalised = value.strip().lower()
+            for member in cls:
+                if member.value == normalised:
+                    return member
+        return None
 
 
 class ProgressReporter:

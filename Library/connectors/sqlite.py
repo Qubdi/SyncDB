@@ -150,9 +150,6 @@ class SQLiteConnector(BaseConnector):
         """Ignore schema for SQLite while preserving the shared connector API."""
         return quote_identifier(table, self.quote_char)
 
-    def _column_definition(self, column: Column) -> str:
-        null_sql = " NULL" if column.nullable else " NOT NULL"
-        return f"{quote_identifier(column.name, self.quote_char)} {column.data_type}{null_sql}"
 
     def _database_path(self) -> str:
         """Resolve sqlite:// URLs, filesystem paths, and in-memory databases."""
