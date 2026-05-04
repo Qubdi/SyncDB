@@ -37,6 +37,12 @@ DatabaseConfig is a frozen dataclass and is safe to share across threads.
 SyncDB instances are NOT thread-safe; create one per thread/task.
 """
 
+from importlib.metadata import version, PackageNotFoundError
+try:
+    __version__ = version("Qubdi-SyncDB")
+except PackageNotFoundError:
+    __version__ = "0.0.0.dev"
+
 from .config import DatabaseConfig
 from .files import FileFormat, FileTransfer
 from .progress import ProgressMode, ProgressReporter

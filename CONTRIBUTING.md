@@ -23,7 +23,6 @@ SyncDB/
 │   │   ├── mssql.py           # pyodbc-based MSSQL connector
 │   │   ├── postgres.py        # psycopg2-based PostgreSQL connector
 │   │   └── mysql.py           # mysql-connector-python / pymysql connector
-│   └── pipelines/             # Thin re-export aliases (reserved for future expansion)
 ├── Tests/
 │   ├── Library/               # Unit tests (no DB required), grouped by module
 │   │   ├── config/            # DatabaseConfig validation
@@ -199,14 +198,8 @@ The `pyproject.toml` remaps `Library/` to the `syncdb` package name on install.
 This keeps source layout flexible while keeping the import name consistent.
 
 **Connectors hold a single bare connection.**
-No connection pooling is done inside the connectors; `pool_min`/`pool_max` on
-`DatabaseConfig` are reserved for a future pooled-connector variant. The current
-connectors are appropriate for batch ETL (one long-lived connection per sync).
-
-**`append_staging` is not yet differentiated from `append`.**
-True staging requires connector-level support (CREATE TEMP TABLE, bulk copy,
-swap). When implementing it, add a `upsert_via_staging` method to
-`BaseConnector` and override in each concrete connector.
+No connection pooling is done inside the connectors. The current connectors are
+appropriate for batch ETL (one long-lived connection per sync).
 
 **`delete_matching_rows` builds one `OR`-joined DELETE per batch.**
 This is simple and correct but can be slow for large `batch_size`. Connectors

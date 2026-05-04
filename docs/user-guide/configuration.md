@@ -67,8 +67,6 @@ pg = DatabaseConfig(
 | `password` | `str \| None` | `None` | Login password |
 | `default_schema` | `str \| None` | engine default | Schema prefix for unqualified table names |
 | `connect_timeout` | `int` | `30` | Seconds before a connection attempt fails |
-| `pool_min` | `int` | `1` | Minimum connection pool size |
-| `pool_max` | `int` | `5` | Maximum connection pool size |
 | `options` | `dict` | `{}` | Extra driver-specific keyword arguments |
 
 ### Engine aliases
@@ -193,3 +191,21 @@ tables:
 ```python
 results = SyncDB.run_config_file("syncdb.yaml")
 ```
+
+If you need to load, inspect, or modify the config dict before running, use `SyncDB.from_job_config` to build the instance separately:
+
+```python
+import yaml
+from syncdb import SyncDB
+
+with open("syncdb.yaml") as f:
+    config = yaml.safe_load(f)
+
+# Optionally mutate config here before creating the instance
+config["settings"]["dry_run"] = True
+
+sync = SyncDB.from_job_config(config)
+results = sync.sync_tables(config.get("tables") or {})
+```
+
+`from_job_config` reads `source`, `target`, and `settings` from the dict (same keys as the YAML schema) and returns a fully constructed `SyncDB` instance. Unrecognised keys inside `settings` are silently ignored.
