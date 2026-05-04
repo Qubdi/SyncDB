@@ -1,7 +1,19 @@
 import io
+import os
+import sys
 import unittest
 
 from syncdb import ProgressMode, ProgressReporter
+
+
+def _show_progress_output(stream: io.StringIO) -> None:
+    if not os.getenv("SYNCDB_TEST_LIVE_OUTPUT"):
+        return
+    sys.__stdout__.write("PROGRESS OUTPUT\n")
+    sys.__stdout__.write(stream.getvalue())
+    if not stream.getvalue().endswith("\n"):
+        sys.__stdout__.write("\n")
+    sys.__stdout__.flush()
 
 
 class ProgressReporterTests(unittest.TestCase):
@@ -11,6 +23,7 @@ class ProgressReporterTests(unittest.TestCase):
 
         reporter.update("public.customers", 5, 10)
         reporter.update("public.customers", 10, 10)
+        _show_progress_output(stream)
 
         output = stream.getvalue().splitlines()
         self.assertEqual(len(output), 2)
@@ -28,6 +41,7 @@ class ProgressReporterTests(unittest.TestCase):
 
         reporter.update("orders", 1, 2)
         reporter.finish()
+        _show_progress_output(stream)
 
         self.assertTrue(stream.getvalue().startswith("\rorders"))
         self.assertTrue(stream.getvalue().endswith("\n"))
@@ -38,6 +52,7 @@ class ProgressReporterTests(unittest.TestCase):
 
         reporter.update("customers", 1000, 250000)
         reporter.finish()
+        _show_progress_output(stream)
 
         self.assertEqual(stream.getvalue(), "")
 
@@ -46,8 +61,9 @@ class ProgressReporterTests(unittest.TestCase):
         reporter = ProgressReporter(ProgressMode.MULTI_LINE, stream=stream)
 
         reporter.update("payments", 5000)
+        _show_progress_output(stream)
 
-        self.assertIn("5000 rows", stream.getvalue())
+        self.assertIn("5,000 rows", stream.getvalue())
 
     def test_finish_is_idempotent_in_one_line_mode(self):
         stream = io.StringIO()
@@ -56,6 +72,7 @@ class ProgressReporterTests(unittest.TestCase):
         reporter.update("orders", 1, 1)
         reporter.finish()
         reporter.finish()  # second call must not add another newline
+        _show_progress_output(stream)
 
         self.assertEqual(stream.getvalue().count("\n"), 1)
 

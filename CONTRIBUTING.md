@@ -100,21 +100,35 @@ Run a specific suite (faster feedback while working on one module):
 # PowerShell
 .\run_tests.ps1 sync          # only the sync/ suite
 .\run_tests.ps1 config -v     # with verbose output
-.\run_tests.ps1 sync -live    # show each test plus SyncDB progress/summary output
+.\run_tests.ps1 sync -live    # colored start/end report
+.\run_tests.ps1 db -detail    # colored report plus SyncDB progress/summaries
 
 # or call pytest directly
 pytest Tests/Library/Components/sync
 pytest Tests/Library/Components/sync -v -k "upsert"   # filter by test name
 pytest Tests/Library/Components/sync --syncdb-live-output
+pytest Tests/Library/DatabaseToDatabase --syncdb-live-output-detail
 pytest Tests/Library/DatabaseToDatabase                 # live Docker DB tests
 ```
 
 Available suites: `config`, `connectors`, `files`, `progress`, `sql`, `sync`, `type_mapping`, `db`
 
-Use `-live` / `--syncdb-live-output` when debugging workflows such as batched
-table movement. It forces verbose pytest output, disables output capture, and
-makes sync tests print batch progress plus final SyncDB summaries. Normal test
-runs stay quiet for CI readability.
+Use `-live` / `--syncdb-live-output` for colored, readable test start/end
+sections and a final summary. Use `-detail` / `--syncdb-live-output-detail`
+when debugging workflows such as batched table movement; detail mode also
+prints SyncDB progress bars plus final SyncDB summaries. Normal test runs stay
+quiet for CI readability.
+
+For live database-to-database tests, this output prints readable
+workflow/scope/database labels such as
+`Database to Database`, `Whole Schema`, and `PGSQL -> MSSQL` instead of raw test
+paths. Some integration tests deliberately execute the same sync two or three
+times to prove repeat-run/idempotency behavior after the first run.
+
+The default DB-to-DB suite generates every seeded PGSQL/MSSQL/MySQL direction
+defined in `Tests/Library/DatabaseToDatabase/parameters.py`. Set
+`SYNCDB_LIVE_SCENARIOS=postgresql_to_mysql` or another comma-separated list only
+when you want to narrow the matrix.
 
 The pre-push hook runs `pytest` automatically before every `git push`. To skip
 it in an emergency: `git push --no-verify`

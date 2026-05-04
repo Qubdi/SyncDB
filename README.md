@@ -1266,16 +1266,49 @@ Unit tests (no database required):
 pytest
 ```
 
-To inspect each test and see live SyncDB progress/summary output:
+To inspect tests with colored start/end sections and a final summary:
 
 ```bash
 pytest Tests/Library/Components/sync --syncdb-live-output
 ```
 
+For the detailed version, use `--syncdb-live-output-detail`. This keeps the same
+colored test sections and also prints SyncDB batch progress bars plus per-sync
+summary tables:
+
+```bash
+pytest Tests/Library/DatabaseToDatabase --syncdb-live-output-detail
+```
+
+The live report hides raw paths and groups each test by workflow, scope, and
+database direction, such as `Database to Database`, `Table Sync`, and
+`PGSQL -> MySQL`.
+
+Available database-to-database scenario ids are:
+
+```text
+postgresql_to_mysql
+postgresql_to_mssql
+mysql_to_postgresql
+mysql_to_mssql
+mssql_to_postgresql
+mssql_to_mysql
+```
+
+Run all enabled database directions with:
+
+```bash
+pytest Tests/Library/DatabaseToDatabase --syncdb-live-output
+```
+
+Several integration tests intentionally run the same sync two or three times to
+verify repeat-run behavior after the first successful run.
+
 On Windows you can use the helper script:
 
 ```powershell
 .\run_tests.ps1 sync -live
+.\run_tests.ps1 db -detail
 ```
 
 Integration tests against real databases require Docker:
@@ -1287,9 +1320,10 @@ cd ../..
 pytest Tests/Library/DatabaseToDatabase
 ```
 
-Database-to-database integration tests are shared across database pairs. Set
+Database-to-database integration tests are shared across database pairs. By
+default they generate every PGSQL/MSSQL/MySQL source-to-target direction. Set
 `SYNCDB_LIVE_SCENARIOS=postgresql_to_mysql` or a comma-separated list of scenario
-ids from `Tests/Library/DatabaseToDatabase/parameters.py` to choose the pairs.
+ids from `Tests/Library/DatabaseToDatabase/parameters.py` to narrow the pairs.
 
 See [Tests/DataBase/README.md](Tests/DataBase/README.md) for details on test database setup.
 

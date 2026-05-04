@@ -92,12 +92,39 @@ SCENARIOS: dict[str, DatabaseScenario] = {
         source=POSTGRES,
         target=MYSQL,
     ),
-    # Add more pairs here as their driver/runtime behavior is ready, for example:
-    # "mssql_to_postgresql": DatabaseScenario(...),
-    # "mysql_to_mssql": DatabaseScenario(...),
+    "postgresql_to_mssql": DatabaseScenario(
+        id="postgresql_to_mssql",
+        label="PostgreSQL to MSSQL",
+        source=POSTGRES,
+        target=MSSQL,
+    ),
+    "mysql_to_postgresql": DatabaseScenario(
+        id="mysql_to_postgresql",
+        label="MySQL to PostgreSQL",
+        source=MYSQL,
+        target=POSTGRES,
+    ),
+    "mysql_to_mssql": DatabaseScenario(
+        id="mysql_to_mssql",
+        label="MySQL to MSSQL",
+        source=MYSQL,
+        target=MSSQL,
+    ),
+    "mssql_to_postgresql": DatabaseScenario(
+        id="mssql_to_postgresql",
+        label="MSSQL to PostgreSQL",
+        source=MSSQL,
+        target=POSTGRES,
+    ),
+    "mssql_to_mysql": DatabaseScenario(
+        id="mssql_to_mysql",
+        label="MSSQL to MySQL",
+        source=MSSQL,
+        target=MYSQL,
+    ),
 }
 
-DEFAULT_SCENARIOS = ("postgresql_to_mysql",)
+DEFAULT_SCENARIOS = tuple(SCENARIOS)
 
 
 def enabled_scenarios() -> tuple[DatabaseScenario, ...]:
@@ -123,4 +150,3 @@ def enabled_scenarios() -> tuple[DatabaseScenario, ...]:
             f"Known: {known}"
         )
     return tuple(SCENARIOS[name] for name in names)
-

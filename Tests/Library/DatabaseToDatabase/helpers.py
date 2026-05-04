@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
 
 from syncdb import ProgressMode, SyncDB
@@ -12,6 +13,7 @@ from syncdb.sql import quote_identifier
 from .parameters import DatabaseScenario, enabled_scenarios
 
 SKIP_MSG = "Docker DB stack not running - start with: docker compose up -d --build"
+TEST_TABLE_PREFIXES = ("t_", "syncdb_test_")
 
 def scenario_class_name(scenario: DatabaseScenario, case_name: str) -> str:
     prefix = "".join(part.capitalize() for part in scenario.id.split("_"))
@@ -50,15 +52,20 @@ def parameterized_filter(scenario: DatabaseScenario, where: str, params: list[ob
 
 
 def make_sync(scenario: DatabaseScenario, **kwargs) -> SyncDB:
-    verbose = os.getenv("SYNCDB_TEST_VERBOSE") if os.getenv("SYNCDB_TEST_LIVE_OUTPUT") else None
+    detail_output = bool(os.getenv("SYNCDB_TEST_LIVE_OUTPUT_DETAIL"))
+    verbose = os.getenv("SYNCDB_TEST_VERBOSE") if detail_output else None
     progress = os.getenv("SYNCDB_TEST_PROGRESS_MODE", ProgressMode.NONE)
-    return SyncDB(
+    sync = SyncDB(
         source=scenario.source.config,
         target=scenario.target.config,
         progress_mode=progress,
         verbose=verbose,
+        verbose_stream=sys.__stdout__ if detail_output else None,
         **kwargs,
     )
+    if detail_output:
+        sync.progress.stream = sys.__stdout__
+    return sync
 
 
 def target_connector(scenario: DatabaseScenario):
@@ -79,7 +86,11 @@ def drop(scenario: DatabaseScenario, *tables: str) -> None:
 def drop_all_target_tables(scenario: DatabaseScenario, *extra: str) -> None:
     connector = target_connector(scenario)
     try:
-        names = list(connector.list_tables(scenario.target_schema)) + list(extra)
+        names = [
+            table
+            for table in connector.list_tables(scenario.target_schema)
+            if table.startswith(TEST_TABLE_PREFIXES)
+        ] + list(extra)
         for table in names:
             connector.drop_table(scenario.target_schema, table)
     finally:

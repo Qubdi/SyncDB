@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..helpers import SchemaLiveBase, count, materialize_scenario_classes
 
 _EXCLUDED_TABLES = ["customers", "products", "orders", "payments", "datatype_samples"]
+_TARGET_PREFIX = "syncdb_test_"
 
 
 class _SchemaSyncExclude(SchemaLiveBase):
@@ -13,6 +14,7 @@ class _SchemaSyncExclude(SchemaLiveBase):
             source_schema=self.scenario.source_schema,
             destination_schema=self.scenario.target_schema,
             exclude=_EXCLUDED_TABLES,
+            table_prefix=_TARGET_PREFIX,
         )
         synced_names = {result.name for result in results}
         for excluded in _EXCLUDED_TABLES:
@@ -23,6 +25,7 @@ class _SchemaSyncExclude(SchemaLiveBase):
             source_schema=self.scenario.source_schema,
             destination_schema=self.scenario.target_schema,
             exclude=_EXCLUDED_TABLES,
+            table_prefix=_TARGET_PREFIX,
         )
         synced_names = {result.name for result in results}
         self.assertIn("sync_audit", synced_names)
@@ -34,8 +37,9 @@ class _SchemaSyncRowCounts(SchemaLiveBase):
             source_schema=self.scenario.source_schema,
             destination_schema=self.scenario.target_schema,
             exclude=_EXCLUDED_TABLES,
+            table_prefix=_TARGET_PREFIX,
         )
-        self.assertEqual(count(self.scenario, "sync_audit"), 500)
+        self.assertEqual(count(self.scenario, f"{_TARGET_PREFIX}sync_audit"), 500)
 
 
 class _SchemaSyncIdempotency(SchemaLiveBase):
@@ -45,14 +49,15 @@ class _SchemaSyncIdempotency(SchemaLiveBase):
             "destination_schema": self.scenario.target_schema,
             "exclude": _EXCLUDED_TABLES,
             "mode": "full_refresh",
+            "table_prefix": _TARGET_PREFIX,
         }
         self.make_sync().sync_schema(**kwargs)
         counts_run1 = {
-            "sync_audit": count(self.scenario, "sync_audit"),
+            "sync_audit": count(self.scenario, f"{_TARGET_PREFIX}sync_audit"),
         }
 
         self.make_sync().sync_schema(**kwargs)
-        self.assertEqual(count(self.scenario, "sync_audit"), counts_run1["sync_audit"])
+        self.assertEqual(count(self.scenario, f"{_TARGET_PREFIX}sync_audit"), counts_run1["sync_audit"])
 
 
 class _SchemaSyncWildcardExclude(SchemaLiveBase):
@@ -61,6 +66,7 @@ class _SchemaSyncWildcardExclude(SchemaLiveBase):
             source_schema=self.scenario.source_schema,
             destination_schema=self.scenario.target_schema,
             exclude=["customers*", "orders*", "payments*", "products*", "datatype_samples"],
+            table_prefix=_TARGET_PREFIX,
         )
         synced_names = {result.name for result in results}
         for name in synced_names:

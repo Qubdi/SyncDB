@@ -167,7 +167,7 @@ class MemoryConnector(BaseConnector):
 
 
 def _live_output_enabled() -> bool:
-    return os.getenv("SYNCDB_TEST_LIVE_OUTPUT", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("SYNCDB_TEST_LIVE_OUTPUT_DETAIL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _live_progress_mode() -> ProgressMode:
