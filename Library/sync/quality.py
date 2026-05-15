@@ -1,16 +1,21 @@
 """Data quality expectations for SyncDB.
 
 After a table sync completes, the optional `expect` spec is evaluated against
-the target table.  All checks are intentionally simple and suitable for tables
-up to a few million rows.  For very large tables, prefer SQL-based monitoring
-(dbt tests, Great Expectations) over this in-memory approach.
+the target table using SQL aggregation queries.  No rows are loaded into Python
+memory; all checks push work down to the database engine.
+
+Supported checks:
+  min_rows   - SELECT COUNT(*) must be >= threshold
+  not_null   - SELECT COUNT(*) WHERE col IS NULL must be 0 for each column
+  unique     - SELECT COUNT(*) - COUNT(DISTINCT ...) must be 0 for each key set
+  range      - SELECT MIN/MAX must be within [min, max] bounds for each column
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..sql import validate_identifier
+from ..sql import quote_identifier, validate_identifier
 from .models import TableSyncResult
 
 if TYPE_CHECKING:
@@ -25,50 +30,61 @@ def validate_expectations(
     result: TableSyncResult,
     batch_size: int,
 ) -> None:
-    """Run optional data-quality checks after a table sync."""
+    """Run optional data-quality checks after a table sync using SQL aggregates."""
     if not expect:
         return
-    rows = [row for batch in target.fetch_batches(schema, table, batch_size=batch_size) for row in batch]
     failures: list[str] = []
+    tbl = target.quote_table(schema, table)
+    ph = target.placeholder
+    q = target.quote_char
 
     min_rows = expect.get("min_rows")
-    if min_rows is not None and len(rows) < int(min_rows):
-        failures.append(f"expected at least {min_rows} rows, found {len(rows)}")
+    if min_rows is not None:
+        rows = target.execute_query(f"SELECT COUNT(*) AS n FROM {tbl}")
+        count = int((rows[0].get("n") or rows[0].get("N") or 0))
+        if count < int(min_rows):
+            failures.append(f"expected at least {min_rows} rows, found {count}")
 
     for column in expect.get("not_null", []) or []:
         validate_identifier(column)
-        null_count = sum(1 for row in rows if row.get(column) is None)
+        col_ref = quote_identifier(column, q)
+        rows = target.execute_query(
+            f"SELECT COUNT(*) AS n FROM {tbl} WHERE {col_ref} IS NULL"
+        )
+        null_count = int((rows[0].get("n") or rows[0].get("N") or 0))
         if null_count:
             failures.append(f"{column} has {null_count} null values")
 
     for key in expect.get("unique", []) or []:
         columns = [key] if isinstance(key, str) else list(key)
-        for column in columns:
-            validate_identifier(column)
-        seen: set[tuple[Any, ...]] = set()
-        duplicates = 0
-        for row in rows:
-            value = tuple(row.get(column) for column in columns)
-            if value in seen:
-                duplicates += 1
-            seen.add(value)
-        if duplicates:
-            failures.append(f"{', '.join(columns)} has {duplicates} duplicate rows")
+        for col in columns:
+            validate_identifier(col)
+        col_refs = ", ".join(quote_identifier(c, q) for c in columns)
+        # COUNT(*) - COUNT(DISTINCT ...) equals the number of duplicate rows.
+        # DISTINCT on multiple columns requires a subquery because SQL does not
+        # support COUNT(DISTINCT col1, col2) in a standard way across all engines.
+        rows = target.execute_query(
+            f"SELECT COUNT(*) AS total, COUNT(*) - COUNT(DISTINCT {col_refs}) AS dups FROM {tbl}"
+        )
+        dups = int((rows[0].get("dups") or rows[0].get("DUPS") or 0))
+        if dups:
+            failures.append(f"{', '.join(columns)} has {dups} duplicate rows")
 
     for column, bounds in (expect.get("range") or {}).items():
         validate_identifier(column)
+        col_ref = quote_identifier(column, q)
         minimum = bounds.get("min")
         maximum = bounds.get("max")
-        for row in rows:
-            value = row.get(column)
-            if value is None:
-                continue
-            if minimum is not None and value < minimum:
-                failures.append(f"{column} has value below {minimum}: {value}")
-                break
-            if maximum is not None and value > maximum:
-                failures.append(f"{column} has value above {maximum}: {value}")
-                break
+        rows = target.execute_query(
+            f"SELECT MIN({col_ref}) AS lo, MAX({col_ref}) AS hi FROM {tbl} WHERE {col_ref} IS NOT NULL"
+        )
+        if rows:
+            lo = rows[0].get("lo") or rows[0].get("LO")
+            hi = rows[0].get("hi") or rows[0].get("HI")
+            if minimum is not None and lo is not None and lo < minimum:
+                failures.append(f"{column} has value below {minimum}: {lo}")
+            if maximum is not None and hi is not None and hi > maximum:
+                failures.append(f"{column} has value above {maximum}: {hi}")
 
     result.expectations_failed = failures
     if failures:

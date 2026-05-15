@@ -73,6 +73,20 @@ class BaseConnector(ABC):
             self.connection.close()
             self.connection = None
 
+    def ping(self) -> bool:
+        """Return True if the database is reachable and a trivial query succeeds.
+
+        Useful for health checks in orchestrators (Airflow, Prefect, Kubernetes
+        readiness probes) before starting a long-running sync job.  Opens a new
+        connection if none is currently held; does NOT keep the connection open.
+        """
+        try:
+            self.connect()
+            self.execute_query("SELECT 1")
+            return True
+        except Exception:
+            return False
+
     def __enter__(self):
         """Support the 'with connector:' context manager pattern."""
         self.connect()

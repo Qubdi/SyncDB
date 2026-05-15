@@ -1,0 +1,25 @@
+# Pinned dev dependency lockfile — regenerate with:
+#   pip install pip-tools
+#   pip-compile pyproject.toml --extra dev --output-file requirements-dev.txt
+#
+# These pins ensure the CI environment and every developer machine use identical
+# versions, preventing "works on my machine" failures caused by transient upstream
+# releases.  Update deliberately (pip-compile --upgrade) rather than ad-hoc.
+
+# DB drivers
+pyodbc==5.2.0
+psycopg2-binary==2.9.10
+mysql-connector-python==9.3.0
+
+# File formats
+pandas==2.2.3
+pyarrow==19.0.1
+openpyxl==3.1.5
+
+# Testing
+pytest==8.3.5
+pytest-cov==6.1.0
+
+# Code quality
+ruff==0.11.9
+mypy==1.15.0

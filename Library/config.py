@@ -137,6 +137,62 @@ class DatabaseConfig:
                 f"missing: {', '.join(missing)}"
             )
 
+    @classmethod
+    def from_env(cls, prefix: str = "SYNCDB") -> "DatabaseConfig":
+        """Build a DatabaseConfig from environment variables.
+
+        Reads the following variables (substituting your prefix for SYNCDB):
+
+          SYNCDB_ENGINE             — required; e.g. "postgresql", "mssql"
+          SYNCDB_CONNECTION_STRING  — full DSN; when set, individual fields are ignored
+          SYNCDB_HOST               — server hostname or IP
+          SYNCDB_PORT               — TCP port (integer)
+          SYNCDB_DATABASE           — database name
+          SYNCDB_USER               — login user
+          SYNCDB_PASSWORD           — login password
+          SYNCDB_DEFAULT_SCHEMA     — default schema override
+          SYNCDB_CONNECT_TIMEOUT    — connection timeout in seconds (integer)
+
+        This method exists so that passwords and credentials are never embedded
+        in source code or config files checked into version control.  Load them
+        from a secrets manager (AWS Secrets Manager, HashiCorp Vault, Azure Key
+        Vault) into environment variables at container/process startup time.
+
+        Example::
+
+            import os
+            os.environ["SYNCDB_ENGINE"] = "postgresql"
+            os.environ["SYNCDB_HOST"] = "db.example.com"
+            os.environ["SYNCDB_DATABASE"] = "mydb"
+            os.environ["SYNCDB_USER"] = "etl_user"
+            os.environ["SYNCDB_PASSWORD"] = secret_from_vault()
+            config = DatabaseConfig.from_env()
+        """
+        import os
+
+        def _get(key: str) -> str | None:
+            return os.environ.get(f"{prefix}_{key.upper()}") or None
+
+        engine = _get("ENGINE")
+        if not engine:
+            raise ValueError(
+                f"Environment variable {prefix}_ENGINE is required for DatabaseConfig.from_env()"
+            )
+        kwargs: dict[str, Any] = {"engine": engine}
+        if conn_str := _get("CONNECTION_STRING"):
+            kwargs["connection_string"] = conn_str
+        else:
+            for field in ("host", "database", "user", "password"):
+                if value := _get(field):
+                    kwargs[field] = value
+            if port_str := _get("PORT"):
+                kwargs["port"] = int(port_str)
+        if schema := _get("DEFAULT_SCHEMA"):
+            kwargs["default_schema"] = schema
+        if timeout_str := _get("CONNECT_TIMEOUT"):
+            kwargs["connect_timeout"] = int(timeout_str)
+        return cls(**kwargs)
+
     @property
     def normalized_engine(self) -> Engine:
         """Return the enum form for code paths that need engine identity checks."""

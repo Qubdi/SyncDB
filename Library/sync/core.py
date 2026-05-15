@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
+import random
 import sys
 import time
 from collections.abc import Sequence
@@ -16,6 +18,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
+
+logger = logging.getLogger(__name__)
 
 from ..config import DatabaseConfig
 from ..connections import create_connector
@@ -106,10 +110,7 @@ class SyncDB:
         if self.source is None or self.target is None:
             raise ValueError("source and target connectors/configs are required for database sync")
         results: list[TableSyncResult] = []
-        # Connections are opened once here and reused across all tables in the dict.
-        # This avoids per-table connection overhead (especially relevant for MSSQL
-        # where ODBC connection setup can take hundreds of milliseconds).
-        # Both are closed unconditionally in `finally` even if a table sync raises.
+        logger.info("Starting sync of %d table(s)", len(tables))
         self.source.connect()
         self.target.connect()
         self.progress.label_width = max((len(spec.get("destination", "")) for spec in tables.values()), default=0)
@@ -284,6 +285,7 @@ class SyncDB:
         _t0 = time.monotonic()
         if "source" not in spec or "destination" not in spec:
             raise ValueError(f"Table spec '{name}' must include source and destination")
+        logger.info("Syncing '%s': %s → %s (mode=%s)", name, spec["source"], spec["destination"], spec.get("mode", "append"))
 
         mode = TransferMode(spec.get("mode", TransferMode.APPEND.value))
         source_name = parse_qualified_name(spec["source"], self.source.config.default_schema)
@@ -411,6 +413,10 @@ class SyncDB:
                 self.target.drop_table(target_name.schema, staging_table)
 
         result.duration_seconds = time.monotonic() - _t0
+        logger.info(
+            "Finished '%s': %d rows written in %d batches (%.2fs)",
+            name, result.rows_written, result.batches, result.duration_seconds,
+        )
         return result
 
     def _sync_schema(
@@ -519,15 +525,21 @@ class SyncDB:
         return prepared
 
     def _with_retries(self, operation: Any) -> Any:
-        """Run a database write operation with simple exponential backoff."""
+        """Run a database write operation with exponential backoff and full jitter."""
         attempt = 0
         while True:
             try:
                 return operation()
-            except Exception:
+            except Exception as exc:
                 if attempt >= self.retry_count:
                     raise
-                time.sleep(self.retry_delay_seconds * (2 ** attempt))
+                # Full jitter: sleep for a random duration in [0, cap] where cap grows
+                # exponentially. This spreads retries across time when many parallel jobs
+                # hit the same transient failure, preventing thundering-herd pile-ups.
+                cap = self.retry_delay_seconds * (2 ** attempt)
+                delay = random.uniform(0, cap)
+                logger.warning("Retry %d/%d after error: %s — sleeping %.2fs", attempt + 1, self.retry_count, exc, delay)
+                time.sleep(delay)
                 attempt += 1
 
     def _replace_from_staging(
@@ -586,36 +598,41 @@ class SyncDB:
             return None
 
     def _infer_columns(self, rows: list[dict[str, Any]]) -> list[Column]:
-        """Infer column types from the Python types in the first row of file data.
+        """Infer column types from Python values across a sample of file rows.
 
         Uses PostgreSQL type names as the intermediate representation and then
-        maps them to the target engine via SchemaMapper.  This keeps the type
-        inference logic engine-agnostic.
+        maps them to the target engine via SchemaMapper.
 
         Only four broad types are produced (boolean, bigint, double precision, text)
         because file formats like CSV carry no type metadata; the target table can
         always be pre-created manually for finer control.
 
-        CAVEAT: Only the FIRST row is sampled.  If a column is None in that row but
-        contains integers in subsequent rows, the column will be inferred as "text".
-        Pre-create the target table with explicit types when type accuracy matters,
-        especially for CSV files where every value arrives as a string anyway.
+        Samples up to 100 rows and skips None values, so a column that is NULL
+        in the first row but numeric in later rows is inferred correctly. If ALL
+        sampled values are None the column falls back to "text". Pre-create the
+        target table with explicit types when higher accuracy is required, especially
+        for CSV files where every value arrives as a string anyway.
         """
         if not rows:
             raise ValueError("Cannot infer a target table from an empty file")
-        sample = rows[0]
+        sample = rows[:100]
+        column_names = list(rows[0].keys())
         columns: list[Column] = []
-        for name, value in sample.items():
-            if isinstance(value, bool):
-                data_type = "boolean"
-            elif isinstance(value, int):
-                data_type = "bigint"
-            elif isinstance(value, float):
-                data_type = "double precision"
-            else:
-                data_type = "text"
-            columns.append(Column(name=name, data_type=data_type, nullable=True))
-        # bool check must come before int because bool is a subclass of int in Python.
+        for col_name in column_names:
+            data_type = "text"
+            for row in sample:
+                value = row.get(col_name)
+                if value is None:
+                    continue
+                # bool must be checked before int: bool is a subclass of int in Python.
+                if isinstance(value, bool):
+                    data_type = "boolean"
+                elif isinstance(value, int):
+                    data_type = "bigint"
+                elif isinstance(value, float):
+                    data_type = "double precision"
+                break
+            columns.append(Column(name=col_name, data_type=data_type, nullable=True))
         return self.schema_mapper.map_columns(columns, "postgresql", self.target.engine)
 
     @staticmethod

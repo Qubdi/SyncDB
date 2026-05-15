@@ -38,16 +38,16 @@ class MSSQLConnector(BaseConnector):
             self.connection = pyodbc.connect(self.config.connection_string, timeout=self.config.connect_timeout)
         else:
             # Build an ODBC connection string from individual config fields.
-            # TrustServerCertificate defaults to "yes" for ease of use in dev
-            # environments where the server uses a self-signed cert; override via
-            # config.options["TrustServerCertificate"] = "no" for production.
+            # TrustServerCertificate defaults to "no" (validates the server cert).
+            # Set config.options["TrustServerCertificate"] = "yes" only for dev
+            # environments where the server uses a self-signed certificate.
             connection_string = (
                 f"Driver={self.config.options.get('driver', '{ODBC Driver 17 for SQL Server}')};"
                 f"Server={self.config.host},{self.config.port};"
                 f"Database={self.config.database};"
                 f"UID={self.config.user};"
                 f"PWD={self.config.password or ''};"
-                f"TrustServerCertificate={self.config.options.get('TrustServerCertificate', 'yes')};"
+                f"TrustServerCertificate={self.config.options.get('TrustServerCertificate', 'no')};"
             )
             self.connection = pyodbc.connect(connection_string, timeout=self.config.connect_timeout)
 
