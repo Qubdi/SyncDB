@@ -204,4 +204,4 @@ def make_sync(source, target, **kwargs) -> SyncDB:
     else:
         kwargs.setdefault("verbose", None)
         progress_mode = kwargs.pop("progress_mode", ProgressMode.NONE)
-    return SyncDB(source_connector=source, target_connector=target, progress_mode=progress_mode, **kwargs)
+    return SyncDB(source=source, target=target, progress_mode=progress_mode, **kwargs)

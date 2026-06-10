@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .base import BaseConnector
 from ..sql import quote_identifier
 from ..type_mapping import Column
+from .base import BaseConnector
 
 
 class SQLiteConnector(BaseConnector):

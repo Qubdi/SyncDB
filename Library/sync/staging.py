@@ -64,7 +64,7 @@ def replace_from_staging(
         )
 
     def swap() -> None:
-        already_in_tx = connector._in_transaction
+        already_in_tx = connector.is_in_transaction
         if not already_in_tx:
             connector.begin()
         try:

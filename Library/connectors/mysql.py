@@ -23,9 +23,9 @@ from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .base import BaseConnector
 from ..sql import quote_identifier
 from ..type_mapping import Column
+from .base import BaseConnector
 
 
 class MySQLConnector(BaseConnector):
@@ -89,7 +89,7 @@ class MySQLConnector(BaseConnector):
                     self.connection.commit()
                 return []
             columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
         finally:
             cursor.close()
 
@@ -109,7 +109,7 @@ class MySQLConnector(BaseConnector):
                 rows = cursor.fetchmany(batch_size)
                 if not rows:
                     break
-                yield [dict(zip(headers, row)) for row in rows]
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
         finally:
             cursor.close()
 
@@ -133,7 +133,7 @@ class MySQLConnector(BaseConnector):
                 rows = cursor.fetchmany(batch_size)
                 if not rows:
                     break
-                yield [dict(zip(headers, row)) for row in rows]
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
         finally:
             cursor.close()
 

@@ -4,6 +4,7 @@ import sys
 import unittest
 
 from syncdb import ProgressMode, ProgressReporter
+from syncdb.progress import format_elapsed
 
 
 def _show_progress_output(stream: io.StringIO) -> None:
@@ -80,6 +81,23 @@ class ProgressReporterTests(unittest.TestCase):
         _show_progress_output(stream)
 
         self.assertEqual(stream.getvalue().count("\n"), 1)
+
+    def test_start_commits_previous_one_line_row(self):
+        stream = io.StringIO()
+        reporter = ProgressReporter(ProgressMode.ONE_LINE, stream=stream)
+        reporter.start()
+        reporter.update("a", 1, 2)
+        reporter.start()  # commits the prior open line with a newline
+        self.assertIn("\n", stream.getvalue())
+
+    def test_invalid_progress_mode_raises(self):
+        with self.assertRaises(ValueError):
+            ProgressMode("sideways")
+
+    def test_format_elapsed_units(self):
+        self.assertEqual(format_elapsed(5.0), "5.0s")
+        self.assertEqual(format_elapsed(75.0), "1m 15.0s")
+        self.assertEqual(format_elapsed(3725.0), "1h 2m 5.0s")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = []
 
+[project.scripts]
+syncdb = "syncdb.cli:main"
+
 [project.optional-dependencies]
 mssql      = ["pyodbc>=5.0"]
 postgres   = ["psycopg2-binary>=2.9"]
@@ -46,16 +49,8 @@ packages = ["syncdb", "syncdb.connectors", "syncdb.sync"]
 "syncdb.sync"       = "Library/sync"
 
 [tool.pytest.ini_options]
-testpaths = [
-    "Tests/Library/Components/config",
-    "Tests/Library/Components/connectors",
-    "Tests/Library/Components/files",
-    "Tests/Library/Components/progress",
-    "Tests/Library/Components/sql",
-    "Tests/Library/Components/sync",
-    "Tests/Library/Components/type_mapping",
-    "Tests/Library/DatabaseToDatabase",
-]
+# Single root keeps new test directories discoverable without editing this list.
+testpaths = ["Tests/Library"]
 
 [tool.ruff]
 target-version = "py310"
@@ -78,7 +73,7 @@ omit = ["Tests/*"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-fail_under = 70
+fail_under = 90
 
 [tool.mypy]
 python_version = "3.10"

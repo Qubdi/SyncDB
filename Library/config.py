@@ -146,7 +146,7 @@ class DatabaseConfig:
             )
 
     @classmethod
-    def from_env(cls, prefix: str = "SYNCDB") -> "DatabaseConfig":
+    def from_env(cls, prefix: str = "SYNCDB") -> DatabaseConfig:
         """Build a DatabaseConfig from environment variables.
 
         Reads the following variables (substituting your prefix for SYNCDB):

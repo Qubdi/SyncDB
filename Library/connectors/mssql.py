@@ -59,8 +59,12 @@ class MSSQLConnector(BaseConnector):
         else:
             # Each individual value is ODBC-escaped so passwords or database names
             # that contain ';' or '=' cannot inject additional connection attributes.
+            # Default to ODBC Driver 18 (current GA; TLS 1.3, strict-encrypt aware).
+            # Override via options={"driver": "{ODBC Driver 17 for SQL Server}"} for
+            # older installs.  Note Driver 18 defaults Encrypt=yes, so a server with
+            # a self-signed cert needs options={"TrustServerCertificate": "yes"}.
             connection_string = (
-                f"Driver={self.config.options.get('driver', '{ODBC Driver 17 for SQL Server}')};"
+                f"Driver={self.config.options.get('driver', '{ODBC Driver 18 for SQL Server}')};"
                 f"Server={self._odbc_escape(f'{self.config.host},{self.config.port}')};"
                 f"Database={self._odbc_escape(self.config.database or '')};"
                 f"UID={self._odbc_escape(self.config.user or '')};"

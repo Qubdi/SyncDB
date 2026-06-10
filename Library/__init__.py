@@ -45,7 +45,7 @@ except PackageNotFoundError:
     __version__ = "0.0.0.dev"
 
 from .config import DatabaseConfig
-from .files import FileFormat, FileTransfer
+from .files import FileFormat, FileTransfer, PickleSecurityWarning
 from .progress import ProgressMode, ProgressReporter
 from .sync import SyncDB, TableSyncResult, TransferMode
 from .type_mapping import Column, SchemaMapper
@@ -57,10 +57,12 @@ __all__ = [
     "DatabaseConfig",
     "FileFormat",
     "FileTransfer",
+    "PickleSecurityWarning",
     "ProgressMode",
     "ProgressReporter",
     "SchemaMapper",
     "SyncDB",
     "TableSyncResult",
     "TransferMode",
+    "__version__",
 ]

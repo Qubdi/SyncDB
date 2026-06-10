@@ -14,9 +14,20 @@ from __future__ import annotations
 import csv
 import pickle
 import warnings
+from collections.abc import Iterable, Iterator
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
+
+
+class PickleSecurityWarning(UserWarning):
+    """Raised when a pickle file is loaded without HMAC integrity verification.
+
+    A dedicated subclass (rather than a bare UserWarning) so the warning survives
+    a broad ``warnings.filterwarnings("ignore", category=UserWarning)`` that
+    production code commonly applies — security warnings should not be silenced
+    by accident.  Suppress it explicitly only if you fully trust the source.
+    """
 
 
 class FileFormat(str, Enum):
@@ -68,7 +79,7 @@ class FileTransfer:
                     "Pickle files execute arbitrary Python code on load — only "
                     "read files from sources you fully control. "
                     "Pass hmac_key= to enforce integrity verification.",
-                    UserWarning,
+                    PickleSecurityWarning,
                     stacklevel=2,
                 )
             else:
@@ -214,10 +225,7 @@ class FileTransfer:
 
     def _read_with_pandas(self, path: Path, fmt: FileFormat) -> list[dict[str, Any]]:
         pd = self._import_pandas()
-        if fmt == FileFormat.PARQUET:
-            frame = pd.read_parquet(path)
-        else:
-            frame = pd.read_excel(path)
+        frame = pd.read_parquet(path) if fmt == FileFormat.PARQUET else pd.read_excel(path)
         # orient="records" produces [{col: val, ...}, ...] matching our internal format.
         return frame.to_dict(orient="records")
 

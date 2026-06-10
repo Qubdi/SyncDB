@@ -64,7 +64,9 @@ class BaseConnector(ABC):
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
         # Lazily set by connect(); None signals that no live connection exists yet.
-        self.connection = None
+        # Typed Any because each engine stores a different driver-specific
+        # connection object (pyodbc/psycopg2/mysql/sqlite3) with no common base.
+        self.connection: Any = None
         # When True, execute_query/insert_batch defer commits; caller must call
         # commit() or rollback() explicitly.
         self._in_transaction = False
@@ -78,9 +80,17 @@ class BaseConnector(ABC):
         """
 
     def close(self) -> None:
-        """Close the underlying connection and reset self.connection to None."""
-        if self.connection is not None:
-            self.connection.close()
+        """Close the underlying connection and reset self.connection to None.
+
+        self.connection is reset in a finally block so that a driver that raises
+        during close() (e.g. a network error mid-teardown) still clears the stale
+        handle.  Otherwise the idempotency guard in connect() would treat the dead
+        connection as live and the connector could never recover.
+        """
+        try:
+            if self.connection is not None:
+                self.connection.close()
+        finally:
             self.connection = None
 
     def reconnect(self) -> None:
@@ -101,6 +111,15 @@ class BaseConnector(ABC):
             return True
         except Exception:
             return False
+
+    @property
+    def is_in_transaction(self) -> bool:
+        """Whether an explicit transaction is open (auto-commit suspended).
+
+        Public read-only view of the internal transaction flag so collaborators
+        (e.g. the staging-swap helper) don't reach into the private attribute.
+        """
+        return self._in_transaction
 
     def begin(self) -> None:
         """Begin an explicit transaction; auto-commit is suspended until commit() or rollback()."""
@@ -331,28 +350,43 @@ class BaseConnector(ABC):
         primary_key: Sequence[str],
         values: dict[str, Any],
     ) -> int:
-        """Update rows matching primary-key values with fixed column values."""
+        """Update rows matching primary-key values with fixed column values.
+
+        Sub-batches the predicate the same way delete_matching_rows does so a large
+        row set never produces a single statement that exceeds the driver parameter
+        limit (pyodbc caps at ~2100).  The SET assignment params are constant per
+        statement, so each chunk's PK predicate budget is reduced by len(values).
+        """
         if not rows or not primary_key or not values:
             return 0
         assignments = ", ".join(
             f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
             for column in values
         )
-        predicates = []
-        params: list[Any] = []
-        for row in rows:
-            predicates.append(
-                "("
-                + " AND ".join(
-                    f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
-                    for column in primary_key
+        set_values = list(values.values())
+        # Keep each statement well under the ~2100 param ceiling: reserve the SET
+        # assignment slots, then divide the remainder among the PK predicate slots.
+        max_params = max(1, 500 - len(set_values))
+        sub_size = max(1, max_params // len(primary_key))
+        total = 0
+        for start in range(0, len(rows), sub_size):
+            chunk = rows[start:start + sub_size]
+            predicates = []
+            params: list[Any] = list(set_values)
+            for row in chunk:
+                predicates.append(
+                    "("
+                    + " AND ".join(
+                        f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
+                        for column in primary_key
+                    )
+                    + ")"
                 )
-                + ")"
-            )
-            params.extend(row[column] for column in primary_key)
-        query = f"UPDATE {self.quote_table(schema, table)} SET {assignments} WHERE " + " OR ".join(predicates)
-        self.execute_query(query, list(values.values()) + params)
-        return len(rows)
+                params.extend(row[column] for column in primary_key)
+            query = f"UPDATE {self.quote_table(schema, table)} SET {assignments} WHERE " + " OR ".join(predicates)
+            self.execute_query(query, params)
+            total += len(chunk)
+        return total
 
     # ------------------------------------------------------------------
     # Streaming SOFT_DELETE helpers
@@ -427,11 +461,20 @@ class BaseConnector(ABC):
         Creates a temporary key table, bulk-inserts source PKs in batches, then
         updates the target with one SQL NOT EXISTS statement.
 
-        NOTE: This method materialises all source PKs in Python memory before
-        inserting them into the database.  For tables with > 1M rows consider
-        using init_seen_keys_table() + apply_soft_deletes_from_keys_table() to
-        stream PKs directly without the Python-side accumulation.
+        .. deprecated::
+            This method materialises all source PKs in Python memory before
+            inserting them, which can OOM on large tables.  Use
+            init_seen_keys_table() + apply_soft_deletes_from_keys_table() to
+            stream PKs directly without the Python-side accumulation; that is the
+            path SyncDB itself uses.
         """
+        warnings.warn(
+            "apply_soft_deletes_sql() accumulates all source PKs in memory and is "
+            "deprecated; use init_seen_keys_table() + "
+            "apply_soft_deletes_from_keys_table() for streaming soft-deletes.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         import uuid as _uuid
         uid = _uuid.uuid4().hex[:8]
         primary_key = [col.name for col in pk_columns]

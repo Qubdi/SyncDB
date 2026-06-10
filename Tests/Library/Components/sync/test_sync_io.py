@@ -83,7 +83,7 @@ class SyncFileIOTests(unittest.TestCase):
             rows_by_table={("dbo", "t"): [{"id": 1}, {"id": 2}]},
             columns_by_table={("dbo", "t"): [Column("id", "int")]},
         )
-        sync = SyncDB(source_connector=source, progress_mode=ProgressMode.NONE, verbose=None)
+        sync = SyncDB(source=source, progress_mode=ProgressMode.NONE, verbose=None)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "out.csv"
@@ -98,7 +98,7 @@ class SyncFileIOTests(unittest.TestCase):
             rows_by_table={("dbo", "t"): [{"id": 1}]},
             columns_by_table={("dbo", "t"): [Column("id", "int")]},
         )
-        sync = SyncDB(source_connector=source, progress_mode=ProgressMode.NONE, verbose=None)
+        sync = SyncDB(source=source, progress_mode=ProgressMode.NONE, verbose=None)
 
         with tempfile.TemporaryDirectory() as tmp:
             query_path = Path(tmp) / "query.sql"
@@ -110,7 +110,7 @@ class SyncFileIOTests(unittest.TestCase):
 
     def test_import_file_to_table_creates_table_and_inserts(self):
         target = MemoryConnector("postgresql", "public")
-        sync = SyncDB(target_connector=target, progress_mode=ProgressMode.NONE, verbose=None)
+        sync = SyncDB(target=target, progress_mode=ProgressMode.NONE, verbose=None)
 
         csv_content = "id,name\n1,Ana\n2,Gio\n"
         with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False) as f:
@@ -137,7 +137,7 @@ class SyncFileIOTests(unittest.TestCase):
                 ]
             },
         )
-        sync = SyncDB(target_connector=target, progress_mode=ProgressMode.NONE, verbose=None)
+        sync = SyncDB(target=target, progress_mode=ProgressMode.NONE, verbose=None)
 
         csv_content = "id,name\n1,Ana\n"
         with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False) as f:
@@ -155,7 +155,7 @@ class SyncFileIOTests(unittest.TestCase):
 
     def test_import_empty_file_cannot_infer_schema_for_new_table(self):
         target = MemoryConnector("postgresql", "public")
-        sync = SyncDB(target_connector=target, progress_mode=ProgressMode.NONE, verbose=None)
+        sync = SyncDB(target=target, progress_mode=ProgressMode.NONE, verbose=None)
 
         with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False) as f:
             f.write("")

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 from syncdb import Column, ProgressMode, SyncDB
@@ -9,6 +10,21 @@ from .helpers import MemoryConnector, make_sync
 
 
 class SyncArgumentTests(unittest.TestCase):
+    def test_legacy_connector_kwargs_emit_deprecation_warning(self):
+        source = MemoryConnector("mssql", "dbo")
+        target = MemoryConnector("postgresql", "public")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            SyncDB(
+                source_connector=source,
+                target_connector=target,
+                progress_mode=ProgressMode.NONE,
+                verbose=None,
+            )
+        messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+        self.assertTrue(any("source_connector is deprecated" in m for m in messages))
+        self.assertTrue(any("target_connector is deprecated" in m for m in messages))
+
     def test_constructor_rejects_invalid_batch_and_retry_arguments(self):
         source = MemoryConnector("mssql", "dbo")
         target = MemoryConnector("postgresql", "public")

@@ -4,6 +4,16 @@ Watermarks persist the maximum processed cursor value between runs so the next
 sync only fetches rows newer than the last run.  This is an at-least-once
 guarantee: if a sync fails mid-stream the file is NOT updated, meaning the next
 run re-reads from the last persisted value and may re-process some rows.
+
+Concurrency limitation
+----------------------
+The watermark store is a local JSON file.  save_watermark() writes atomically
+(temp file + os.replace) so a single process never sees a half-written file, but
+there is NO cross-process locking.  Two processes syncing the SAME table key
+concurrently (e.g. overlapping cron runs, or multiple Kubernetes replicas) can
+interleave their read-modify-write and lose one update.  For multi-writer
+deployments, give each writer a distinct watermark_store path, serialise the runs,
+or keep watermark state in a database keyed by the sync identity instead.
 """
 
 from __future__ import annotations

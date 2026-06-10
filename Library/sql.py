@@ -18,11 +18,23 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 # Restricts identifiers to safe ASCII letters, digits, and underscores.
 # Quoted identifiers that could contain spaces or special chars are not supported
 # by design; the added complexity isn't worth the risk.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Restricts SQL type strings (used for type_overrides and generated DDL) to a safe
+# shape: a base name of letters/digits/spaces/underscores (e.g. "double precision",
+# "datetime2"), an optional single parenthetical modifier holding only
+# letters/digits/commas/spaces (covers "varchar(50)", "numeric(20,0)",
+# "nvarchar(max)"), and an optional trailing "[]" array suffix (PostgreSQL).
+# This blocks injection via type strings (";", ")", quotes, comments) while still
+# accepting every type this library emits or a caller would reasonably override to.
+_TYPE_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_ ]*"      # base type name
+    r"(\([A-Za-z0-9_, ]+\))?"        # optional (n), (p,s), or (max)
+    r"(\s*\[\s*\])?$"                # optional array suffix
+)
 
 # Token-based deny-list for raw WHERE clause strings.
 # Each token is matched against a space-padded lowercase copy of the clause so
@@ -76,6 +88,19 @@ def validate_identifier(name: str) -> str:
     if not _IDENTIFIER_RE.match(str(name or "")):
         raise ValueError(f"Unsafe SQL identifier: {name}")
     return name
+
+
+def validate_type(data_type: str) -> str:
+    """Raise ValueError if a SQL type string contains unsafe characters.
+
+    Type strings are embedded directly in CREATE/ALTER TABLE DDL and cannot be
+    parameterised, so they must be validated like identifiers.  This guards the
+    `type_overrides` job-config option, whose values would otherwise reach the
+    DDL builder verbatim and allow injection (e.g. "int); DROP TABLE x;--").
+    """
+    if not _TYPE_RE.match(str(data_type or "").strip()):
+        raise ValueError(f"Unsafe SQL type: {data_type!r}")
+    return data_type
 
 
 def parse_qualified_name(name: str, default_schema: str | None = None) -> QualifiedName:
@@ -149,12 +174,13 @@ def build_where_clause(filter_cfg: dict[str, Any] | str | None) -> tuple[str, li
     return (f" WHERE {validate_where_clause(where)} ", params) if where else ("", [])
 
 
-def build_order_by(order_by: list[str] | tuple[str, ...] | str | None, quote_char: str = "[") -> str:
+def build_order_by(order_by: list[str] | tuple[str, ...] | str | None, quote_char: str = '"') -> str:
     """Build a quoted ORDER BY clause from a column name or list of column names.
 
     Returns "" when order_by is falsy so callers can concatenate the result
-    directly into a query string.  Defaults to MSSQL-style [brackets] because
-    ORDER BY is most commonly needed for MSSQL's offset-based pagination.
+    directly into a query string.  Defaults to the SQL-standard double-quote so a
+    caller that forgets to pass quote_char still produces portable SQL; engines
+    that need a different quote (MSSQL brackets, MySQL backticks) pass their own.
     """
     if not order_by:
         return ""

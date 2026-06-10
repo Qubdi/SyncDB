@@ -1,7 +1,8 @@
 import unittest
+import warnings
 from pathlib import Path
 
-from syncdb import FileTransfer
+from syncdb import FileTransfer, PickleSecurityWarning
 
 
 class FileTransferTests(unittest.TestCase):
@@ -41,6 +42,43 @@ class FileTransferTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
         self.assertEqual(loaded, rows)
+
+    def test_reading_pickle_without_hmac_warns_security(self):
+        transfer = FileTransfer()
+        rows = [{"id": 1}]
+        path = self._tmp("warn.pickle")
+        try:
+            transfer.write(rows, path)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                transfer.read(path)
+            # Dedicated PickleSecurityWarning subclass survives generic UserWarning filters.
+            self.assertTrue(any(issubclass(w.category, PickleSecurityWarning) for w in caught))
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_hmac_signed_pickle_round_trip_and_tamper_detection(self):
+        transfer = FileTransfer()
+        rows = [{"id": 1, "v": "a"}]
+        path = self._tmp("signed.pickle")
+        sig = path.with_suffix(path.suffix + ".sig")
+        try:
+            transfer.write(rows, path, hmac_key="secret")
+            # Correct key verifies and loads without warning.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", PickleSecurityWarning)
+                loaded = transfer.read(path, hmac_key="secret")
+            self.assertEqual(loaded, rows)
+            # Wrong key fails verification.
+            with self.assertRaises(ValueError):
+                transfer.read(path, hmac_key="wrong")
+            # Missing signature file fails verification.
+            sig.unlink()
+            with self.assertRaises(ValueError):
+                transfer.read(path, hmac_key="secret")
+        finally:
+            path.unlink(missing_ok=True)
+            sig.unlink(missing_ok=True)
 
     def test_writes_empty_csv_produces_header_only_file(self):
         transfer = FileTransfer()

@@ -29,7 +29,7 @@ from ..connections import create_connector
 from ..connectors.base import BaseConnector
 from ..files import FileTransfer
 from ..progress import ProgressMode, ProgressReporter
-from ..sql import build_order_by, build_where_clause, parse_qualified_name, validate_identifier
+from ..sql import build_order_by, build_where_clause, parse_qualified_name, validate_identifier, validate_type
 from ..type_mapping import Column, SchemaMapper
 from . import watermark as wm
 from .inference import infer_columns
@@ -227,7 +227,9 @@ class SyncDB:
             src.connect()
             tgt.connect()
             try:
-                return index, self._sync_one_table(name, spec, src, tgt, progress=reporter, sync_id=sync_id)
+                return index, self._sync_one_table(
+                    name, spec, src, tgt, progress=reporter, sync_id=sync_id, abort=abort
+                )
             finally:
                 src.close()
                 tgt.close()
@@ -431,8 +433,14 @@ class SyncDB:
         target: BaseConnector,
         progress: ProgressReporter | None = None,
         sync_id: str | None = None,
+        abort: threading.Event | None = None,
     ) -> TableSyncResult:
-        """Synchronize a single table spec and return audited runtime details."""
+        """Synchronize a single table spec and return audited runtime details.
+
+        abort, when supplied (parallel mode), is checked at the top of each batch
+        so a worker stops promptly after a sibling table fails instead of running
+        to completion — ThreadPoolExecutor cannot interrupt an in-flight future.
+        """
         _t0 = time.monotonic()
         _log = logging.LoggerAdapter(logger, {"sync_id": sync_id or "?"})
 
@@ -534,6 +542,8 @@ class SyncDB:
                 order_by=order_sql,
                 batch_size=batch_size,
             ):
+                if abort is not None and abort.is_set():
+                    raise RuntimeError(f"Sync of '{name}' aborted due to a sibling table failure")
                 if watermark_cfg:
                     result.watermark_value = wm.max_watermark_value(
                         result.watermark_value, raw_batch, watermark_cfg["column"]
@@ -583,9 +593,10 @@ class SyncDB:
                 if on_batch:
                     on_batch(result)
 
-            if use_tx:
-                target.commit()
-
+            # Staging swap and soft-delete are part of the same logical unit of
+            # work as the batch writes, so they run BEFORE commit — a crash here
+            # rolls back everything (where the engine supports DDL rollback) and
+            # the next run re-processes cleanly under the at-least-once guarantee.
             if staging_table:
                 replace_from_staging(
                     target, target_name.schema, target_name.table,
@@ -600,12 +611,20 @@ class SyncDB:
                     seen_keys_table, pk_cols_for_sd, deleted_at,
                 )
 
-            # Validate expectations BEFORE saving the watermark so that a failed
-            # quality check does not advance the cursor — the next run will
-            # re-process the batch and re-check.
+            # Validate expectations BEFORE committing and saving the watermark so
+            # that a failed quality check rolls back the write (when use_tx) and
+            # does not advance the cursor — the next run re-processes and re-checks.
             validate_expectations(
                 target, target_name.schema, target_name.table, spec.get("expect"), result, self.batch_size
             )
+
+            # Commit only after every mutation and the quality gate have succeeded.
+            if use_tx:
+                target.commit()
+
+            # Persist the watermark only after a durable commit.  Saving it before
+            # the commit could skip rows on a commit failure (at-most-once / data
+            # loss); saving after means at-worst re-processing (at-least-once).
             if watermark_cfg and result.watermark_value is not None:
                 wm.save_watermark(watermark_cfg, result.watermark_value)
 
@@ -711,8 +730,11 @@ class SyncDB:
         type_overrides: dict[str, str] | None,
     ) -> list[Column]:
         overrides = dict(type_overrides or {})
-        for name in overrides:
+        for name, data_type in overrides.items():
             validate_identifier(name)
+            # The override VALUE lands verbatim in CREATE/ALTER TABLE DDL, so it
+            # must be validated too — otherwise a job config could inject SQL.
+            validate_type(data_type)
         result: list[Column] = []
         for column in columns:
             target_name = rename_map.get(column.name, column.name)

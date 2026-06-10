@@ -14,9 +14,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
-from .base import BaseConnector
 from ..sql import quote_identifier
 from ..type_mapping import Column
+from .base import BaseConnector
 
 
 class PostgresConnector(BaseConnector):
@@ -25,6 +25,12 @@ class PostgresConnector(BaseConnector):
     quote_char = '"'
     # psycopg2 uses %s placeholders (same as pymysql / mysql-connector).
     placeholder = "%s"
+
+    # Rows per execute_values page.  Caps the multi-row VALUES statement size so a
+    # very large batch (e.g. 50k rows x 100 cols) is not assembled into one giant
+    # statement that stresses the client string builder and the server parser.
+    # The batch is still one cursor call; psycopg2 internally splits into pages.
+    _EXECUTE_VALUES_PAGE_SIZE = 1000
 
     def connect(self) -> None:
         """Open an idempotent psycopg2 connection."""
@@ -68,7 +74,7 @@ class PostgresConnector(BaseConnector):
                     self.connection.commit()
                 return []
             columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
         finally:
             cursor.close()
 
@@ -88,7 +94,7 @@ class PostgresConnector(BaseConnector):
                 rows = cursor.fetchmany(batch_size)
                 if not rows:
                     break
-                yield [dict(zip(headers, row)) for row in rows]
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
         finally:
             cursor.close()
 
@@ -112,7 +118,7 @@ class PostgresConnector(BaseConnector):
                 rows = cursor.fetchmany(batch_size)
                 if not rows:
                     break
-                yield [dict(zip(headers, row)) for row in rows]
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
         finally:
             cursor.close()
 
@@ -143,7 +149,7 @@ class PostgresConnector(BaseConnector):
                 cursor,
                 f"INSERT INTO {table_ref} ({column_sql}) VALUES %s",
                 values,
-                page_size=len(values),
+                page_size=self._EXECUTE_VALUES_PAGE_SIZE,
             )
             if not self._in_transaction:
                 self.connection.commit()
@@ -191,7 +197,7 @@ class PostgresConnector(BaseConnector):
         values = [tuple(row.get(col) for col in columns) for row in records]
         cursor = self.connection.cursor()
         try:
-            execute_values(cursor, query, values, page_size=len(values))
+            execute_values(cursor, query, values, page_size=self._EXECUTE_VALUES_PAGE_SIZE)
             if not self._in_transaction:
                 self.connection.commit()
         finally:

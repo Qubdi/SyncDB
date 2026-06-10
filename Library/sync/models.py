@@ -15,8 +15,12 @@ class TransferMode(str, Enum):
     # Pure append: insert every source row as-is and never delete/update existing
     # target rows.  Useful for immutable event streams, audit logs, and history tables.
     INSERT_ONLY = "insert_only"
-    # Explicit upsert mode.  Today it uses the same portable delete+insert strategy
-    # as APPEND; connector-native MERGE/ON CONFLICT optimisations can replace this later.
+    # Explicit upsert mode using each engine's native atomic statement:
+    # PostgreSQL INSERT ... ON CONFLICT DO UPDATE, MSSQL MERGE, MySQL
+    # INSERT ... ON DUPLICATE KEY UPDATE, SQLite ON CONFLICT DO UPDATE.
+    # Requires a primary key; with none, falls back to a plain insert.
+    # (Contrast APPEND, which deletes target rows matching incoming PKs and then
+    # inserts — two separate statements, not a single atomic upsert.)
     UPSERT = "upsert"
     # Append every source row with a _synced_at timestamp for historical snapshots.
     SNAPSHOT = "snapshot"
