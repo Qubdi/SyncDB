@@ -177,7 +177,7 @@ class FileTransfer:
 
     def _write_csv_streaming(self, batches: Iterator[list[dict[str, Any]]], path: Path) -> int:
         count = 0
-        writer: csv.DictWriter | None = None
+        writer: csv.DictWriter[str] | None = None
         with path.open("w", encoding="utf-8", newline="") as handle:
             for batch in batches:
                 if not batch:
@@ -196,6 +196,7 @@ class FileTransfer:
         except ImportError as exc:
             raise ImportError("pyarrow is required for streaming Parquet writes") from exc
         count = 0
+        # pyarrow ships no type stubs, so its calls are untyped under --strict.
         writer: pq.ParquetWriter | None = None
         try:
             for batch in batches:
@@ -203,12 +204,12 @@ class FileTransfer:
                     continue
                 table = pa.Table.from_pylist(batch)
                 if writer is None:
-                    writer = pq.ParquetWriter(str(path), table.schema)
-                writer.write_table(table)
+                    writer = pq.ParquetWriter(str(path), table.schema)  # type: ignore[no-untyped-call]
+                writer.write_table(table)  # type: ignore[no-untyped-call]
                 count += len(batch)
         finally:
             if writer is not None:
-                writer.close()
+                writer.close()  # type: ignore[no-untyped-call]
         return count
 
     def _records_from_object(self, data: Any) -> list[dict[str, Any]]:
@@ -220,14 +221,16 @@ class FileTransfer:
         if isinstance(data, list):
             return [dict(row) for row in data]
         if hasattr(data, "to_dict"):
-            return data.to_dict(orient="records")
+            records: list[dict[str, Any]] = data.to_dict(orient="records")
+            return records
         raise TypeError("Pickle file must contain a list of mappings or a pandas DataFrame")
 
     def _read_with_pandas(self, path: Path, fmt: FileFormat) -> list[dict[str, Any]]:
         pd = self._import_pandas()
         frame = pd.read_parquet(path) if fmt == FileFormat.PARQUET else pd.read_excel(path)
         # orient="records" produces [{col: val, ...}, ...] matching our internal format.
-        return frame.to_dict(orient="records")
+        records: list[dict[str, Any]] = frame.to_dict(orient="records")
+        return records
 
     def _write_with_pandas(self, records: list[dict[str, Any]], path: Path, fmt: FileFormat) -> int:
         pd = self._import_pandas()
@@ -240,7 +243,7 @@ class FileTransfer:
             frame.to_excel(path, index=False)
         return len(frame)
 
-    def _import_pandas(self):
+    def _import_pandas(self) -> Any:
         # Deferred import: pandas is an optional dependency (~30 MB). Raising here
         # rather than at module load means CSV/Pickle users are never penalised.
         try:

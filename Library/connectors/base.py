@@ -137,12 +137,12 @@ class BaseConnector(ABC):
             self.connection.rollback()
         self._in_transaction = False
 
-    def __enter__(self):
+    def __enter__(self) -> BaseConnector:
         """Support the 'with connector:' context manager pattern."""
         self.connect()
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
     def quote_table(self, schema: str | None, table: str) -> str:

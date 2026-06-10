@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -180,6 +181,8 @@ class SyncDB:
     def _sync_tables_sequential(
         self, specs: dict[str, dict[str, Any]], sync_id: str
     ) -> list[TableSyncResult]:
+        # sync_tables() guarantees both are set before dispatching here.
+        assert self.source is not None and self.target is not None
         results: list[TableSyncResult] = []
         _log = logging.LoggerAdapter(logger, {"sync_id": sync_id})
         _log.info("Starting sequential sync of %d table(s)", len(specs))
@@ -201,6 +204,7 @@ class SyncDB:
     def _sync_tables_parallel(
         self, specs: dict[str, dict[str, Any]], sync_id: str
     ) -> list[TableSyncResult]:
+        assert self.source is not None and self.target is not None
         if not hasattr(self.source, "config") or not hasattr(self.target, "config"):
             raise ValueError(
                 "max_workers > 1 requires DatabaseConfig-backed connectors. "
@@ -217,12 +221,16 @@ class SyncDB:
         errors: list[BaseException] = []
 
         factory = self._connector_factory or create_connector
+        # Bind configs outside the worker closure so each thread builds its own
+        # connector pair from the shared (frozen, thread-safe) DatabaseConfig.
+        source_config = self.source.config
+        target_config = self.target.config
 
         def sync_in_thread(index: int, name: str, spec: dict[str, Any]) -> tuple[int, TableSyncResult]:
             if abort.is_set():
                 raise RuntimeError(f"Sync of '{name}' cancelled due to earlier failure")
-            src = factory(self.source.config)
-            tgt = factory(self.target.config)
+            src = factory(source_config)
+            tgt = factory(target_config)
             reporter = ProgressReporter(ProgressMode.NONE)
             src.connect()
             tgt.connect()
@@ -318,8 +326,10 @@ class SyncDB:
                 sorted(_ALLOWED_SETTINGS),
             )
 
-        source = cls._parse_db_config(config.get("source"), "source") if config.get("source") else None
-        target = cls._parse_db_config(config.get("target"), "target") if config.get("target") else None
+        raw_source = config.get("source")
+        raw_target = config.get("target")
+        source = cls._parse_db_config(raw_source, "source") if raw_source else None
+        target = cls._parse_db_config(raw_target, "target") if raw_target else None
         kwargs = {key: value for key, value in settings.items() if key in _ALLOWED_SETTINGS}
         return cls(source=source, target=target, **kwargs)
 
@@ -352,14 +362,15 @@ class SyncDB:
         """Parse a JSON or YAML job file."""
         text = path.read_text(encoding="utf-8")
         if path.suffix.lower() == ".json":
-            return json.loads(text)
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
         if path.suffix.lower() in {".yaml", ".yml"}:
             try:
                 import yaml
             except ImportError as exc:
                 raise ImportError("PyYAML is required to read YAML job configs; use JSON or install pyyaml") from exc
-            data = yaml.safe_load(text)
-            return data if isinstance(data, dict) else {}
+            loaded = yaml.safe_load(text)
+            return loaded if isinstance(loaded, dict) else {}
         raise ValueError("Job config file must end with .json, .yaml, or .yml")
 
     def export_query_to_file(
@@ -554,21 +565,16 @@ class SyncDB:
                 if not batch:
                     continue
 
-                def write_batch(
-                    _batch=batch,
-                    _mode=mode,
-                    _ws=write_schema,
-                    _wt=write_table,
-                    _pk=target_primary_key,
-                    _cols=target_column_names,
-                ) -> int:
-                    if _mode == TransferMode.UPSERT and _pk:
-                        return target.upsert_batch(_ws, _wt, _batch, _cols, _pk)
-                    if _mode in {TransferMode.APPEND, TransferMode.SOFT_DELETE} and _pk:
-                        target.delete_matching_rows(_ws, _wt, _batch, _pk)
-                    return target.insert_batch(_ws, _wt, _batch, _cols)
-
-                written = self._retry(write_batch, on_retry=target.reconnect)
+                # partial binds this iteration's values into a zero-arg callable for
+                # _retry, without a closure over loop variables (which would be a
+                # late-binding hazard and trip linters).
+                written: int = self._retry(
+                    partial(
+                        self._write_batch, target, mode, write_schema, write_table,
+                        batch, target_column_names, target_primary_key,
+                    ),
+                    on_retry=target.reconnect,
+                )
 
                 # Stream source PKs directly into the seen-keys table to avoid
                 # accumulating an unbounded Python set for SOFT_DELETE mode.
@@ -578,13 +584,13 @@ class SyncDB:
                         for row in batch
                     ]
                     if pk_rows:
-                        def _insert_keys(
-                            _rows=pk_rows,
-                            _sk=seen_keys_table,
-                            _pk=target_primary_key,
-                        ) -> int:
-                            return target.insert_batch(target_name.schema, _sk, _rows, _pk)
-                        self._retry(_insert_keys, on_retry=target.reconnect)
+                        self._retry(
+                            partial(
+                                target.insert_batch,
+                                target_name.schema, seen_keys_table, pk_rows, target_primary_key,
+                            ),
+                            on_retry=target.reconnect,
+                        )
 
                 result.batches += 1
                 result.rows_read += len(raw_batch)
@@ -647,6 +653,28 @@ class SyncDB:
             name, result.rows_written, result.batches, result.duration_seconds,
         )
         return result
+
+    @staticmethod
+    def _write_batch(
+        target: BaseConnector,
+        mode: TransferMode,
+        schema: str | None,
+        table: str,
+        batch: list[dict[str, Any]],
+        columns: list[str],
+        primary_key: list[str],
+    ) -> int:
+        """Write one prepared batch using the statement that fits the transfer mode.
+
+        UPSERT uses the connector's native upsert; APPEND/SOFT_DELETE delete the
+        incoming primary keys first (so updated rows replace their predecessors)
+        and then insert; everything else is a plain insert.
+        """
+        if mode == TransferMode.UPSERT and primary_key:
+            return target.upsert_batch(schema, table, batch, columns, primary_key)
+        if mode in {TransferMode.APPEND, TransferMode.SOFT_DELETE} and primary_key:
+            target.delete_matching_rows(schema, table, batch, primary_key)
+        return target.insert_batch(schema, table, batch, columns)
 
     def _prepare_write_target(
         self,

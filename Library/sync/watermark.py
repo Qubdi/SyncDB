@@ -112,10 +112,10 @@ def apply_watermark_filter(
 
 def max_watermark_value(current: Any, rows: list[dict[str, Any]], column: str) -> Any:
     """Track the maximum non-null watermark value seen across fetched batches."""
-    values = [row.get(column) for row in rows if row.get(column) is not None]
+    values: list[Any] = [row.get(column) for row in rows if row.get(column) is not None]
     if not values:
         return current
-    batch_max = max(values)
+    batch_max: Any = max(values)
     if current is None or batch_max > current:
         return batch_max
     return current

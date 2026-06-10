@@ -77,12 +77,8 @@ fail_under = 90
 
 [tool.mypy]
 python_version = "3.10"
-strict = false
-warn_return_any = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-disallow_untyped_defs = true
-disallow_any_generics = true
-no_implicit_optional = true
+strict = true
+# Third-party DB drivers and pyarrow/pandas ship without type stubs; treat their
+# missing imports as Any rather than failing, while keeping strict checks on our code.
 ignore_missing_imports = true
 exclude = ["Tests/"]
