@@ -25,17 +25,43 @@ from typing import Any
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Token-based deny-list for raw WHERE clause strings.
-# Blocks statement terminators (;), inline comments (--), block comments (/* */),
-# and MSSQL extended stored procedure prefixes (xp_, sp_) that could be used for
-# command execution or stacked queries.
+# Each token is matched against a space-padded lowercase copy of the clause so
+# word-boundary patterns (e.g. " union ") don't match substrings ("reunions").
 #
-# IMPORTANT — this is a partial safety net, NOT a full SQL sanitizer.  Raw WHERE
-# clauses from untrusted sources (user-supplied HTTP parameters, un-validated
-# config values) should be treated as injection risks regardless of this check.
-# The intended use case is developer-authored filter expressions in job configs.
+# IMPORTANT — this is a hardened safety net, NOT a full SQL parser.  Raw WHERE
+# clauses from untrusted sources (user HTTP parameters, un-validated config
+# values) must still be treated as injection risks.  The intended use case is
+# developer-authored filter expressions in job configs.
 # Never add a flag to skip this check; extend the deny-list instead if a
-# legitimate token is being blocked.
-_UNSAFE_WHERE_TOKENS = (";", "--", "/*", "*/", " xp_", " sp_")
+# legitimate token is being incorrectly blocked.
+_UNSAFE_WHERE_TOKENS = (
+    ";",               # statement terminator — stacked queries
+    "--",              # inline comment
+    "/*",              # block comment open
+    "*/",              # block comment close
+    " xp_",            # MSSQL extended stored procedures (command execution)
+    " sp_",            # MSSQL system stored procedures
+    " union ",         # UNION-based data exfiltration
+    " select ",        # subquery injection
+    " insert ",        # DML injection via subquery context
+    " update ",        # DML injection
+    " delete ",        # DML injection
+    " drop ",          # DDL injection
+    " alter ",         # DDL injection
+    " create ",        # DDL injection
+    " exec ",          # EXEC procedure call
+    " execute ",       # EXECUTE procedure call
+    " declare ",       # T-SQL variable declaration
+    " truncate ",      # DDL/DML injection
+    " sleep(",         # MySQL time-based blind injection
+    " waitfor ",       # MSSQL time-based blind injection (WAITFOR DELAY)
+    " benchmark(",     # MySQL time-based blind injection
+    " pg_sleep(",      # PostgreSQL time-based blind injection
+    " into outfile",   # MySQL arbitrary file write via SELECT INTO OUTFILE
+    " load_file(",     # MySQL arbitrary file read
+    "0x",              # hex-encoded string literals used to evade filters
+    "\x00",            # null byte injection
+)
 
 
 @dataclass(frozen=True)

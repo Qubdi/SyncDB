@@ -7,9 +7,9 @@ orchestration logic while this module owns all formatting details.
 
 from __future__ import annotations
 
-from typing import IO, Any
+from typing import IO
 
-from ..progress import _format_elapsed
+from ..progress import format_elapsed
 from .models import TableSyncResult
 
 
@@ -26,7 +26,7 @@ def emit_summary(results: list[TableSyncResult], verbose: str | None, stream: IO
                 f"{result.rows_written:,}",
                 str(result.batches),
                 "yes" if result.table_created else "no",
-                _format_elapsed(result.duration_seconds),
+                format_elapsed(result.duration_seconds),
             ]
             for result in results
         ]
@@ -54,7 +54,7 @@ def emit_summary(results: list[TableSyncResult], verbose: str | None, stream: IO
                 "fail" if result.expectations_failed else "ok",
                 str(result.watermark_value) if result.watermark_value is not None else "-",
                 "yes" if result.dry_run else "no",
-                _format_elapsed(result.duration_seconds),
+                format_elapsed(result.duration_seconds),
             ]
             for result in results
         ]
@@ -66,7 +66,7 @@ def emit_summary(results: list[TableSyncResult], verbose: str | None, stream: IO
         f"total: {sum(result.rows_written for result in results):,} rows "
         f"in {sum(result.batches for result in results):,} batches "
         f"across {len(results):,} tables "
-        f"in {_format_elapsed(total_duration)}\n"
+        f"in {format_elapsed(total_duration)}\n"
     )
     stream.flush()
 

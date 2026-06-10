@@ -14,9 +14,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
-from .base import BaseConnector
 from ..sql import quote_identifier, validate_identifier
 from ..type_mapping import Column
+from .base import BaseConnector
 
 
 class MSSQLConnector(BaseConnector):
@@ -25,6 +25,22 @@ class MSSQLConnector(BaseConnector):
     quote_char = "["
     # pyodbc uses "?" positional placeholders (ODBC standard).
     placeholder = "?"
+
+    @staticmethod
+    def _odbc_escape(value: str) -> str:
+        """Wrap an ODBC connection-string value in braces when it contains special chars.
+
+        Per the ODBC spec, values containing '{', '}', ';', or '=' must be enclosed
+        in curly braces.  A literal '}' inside the value is escaped as '}}' so the
+        driver does not misparse the closing brace as the end of the quoted section.
+
+        Prevents passwords or hostnames that contain ';' from injecting extra
+        ODBC attributes into the connection string.
+        """
+        s = str(value)
+        if any(c in s for c in ('{', '}', ';', '=')):
+            return '{' + s.replace('}', '}}') + '}'
+        return s
 
     def connect(self) -> None:
         """Open an idempotent pyodbc connection for SQL Server."""
@@ -35,33 +51,59 @@ class MSSQLConnector(BaseConnector):
         except ImportError as exc:
             raise ImportError("pyodbc is required for MSSQL connections") from exc
         if self.config.connection_string:
-            self.connection = pyodbc.connect(self.config.connection_string, timeout=self.config.connect_timeout)
+            # query_timeout is passed as pyodbc's `timeout` which applies to
+            # query execution (not just connection).  Falls back to connect_timeout
+            # when query_timeout is not set.
+            timeout = self.config.query_timeout or self.config.connect_timeout
+            self.connection = pyodbc.connect(self.config.connection_string, timeout=timeout)
         else:
-            # Build an ODBC connection string from individual config fields.
-            # TrustServerCertificate defaults to "no" (validates the server cert).
-            # Set config.options["TrustServerCertificate"] = "yes" only for dev
-            # environments where the server uses a self-signed certificate.
+            # Each individual value is ODBC-escaped so passwords or database names
+            # that contain ';' or '=' cannot inject additional connection attributes.
             connection_string = (
                 f"Driver={self.config.options.get('driver', '{ODBC Driver 17 for SQL Server}')};"
-                f"Server={self.config.host},{self.config.port};"
-                f"Database={self.config.database};"
-                f"UID={self.config.user};"
-                f"PWD={self.config.password or ''};"
+                f"Server={self._odbc_escape(f'{self.config.host},{self.config.port}')};"
+                f"Database={self._odbc_escape(self.config.database or '')};"
+                f"UID={self._odbc_escape(self.config.user or '')};"
+                f"PWD={self._odbc_escape(self.config.password or '')};"
                 f"TrustServerCertificate={self.config.options.get('TrustServerCertificate', 'no')};"
+                f"LoginTimeout={self.config.connect_timeout};"
             )
-            self.connection = pyodbc.connect(connection_string, timeout=self.config.connect_timeout)
+            timeout = self.config.query_timeout or 0
+            self.connection = pyodbc.connect(connection_string, timeout=timeout)
 
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
         self.connect()
         cursor = self.connection.cursor()
-        cursor.execute(query, tuple(params or []))
-        if not cursor.description:
-            # DML statements (INSERT, DELETE, TRUNCATE, DDL) return no description;
-            # commit immediately so the change is visible to subsequent queries.
-            self.connection.commit()
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            cursor.execute(query, tuple(params or []))
+            if not cursor.description:
+                if not self._in_transaction:
+                    self.connection.commit()
+                return []
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def execute_query_batches(
+        self,
+        query: str,
+        params: Sequence[Any] | None = None,
+        batch_size: int = 5000,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Stream query results in batches using cursor.fetchmany()."""
+        self.connect()
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, tuple(params or []))
+            headers = [col[0] for col in cursor.description]
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
+        finally:
+            cursor.close()
 
     def fetch_batches(
         self,
@@ -76,13 +118,16 @@ class MSSQLConnector(BaseConnector):
         self.connect()
         names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
         cursor = self.connection.cursor()
-        cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-        headers = [col[0] for col in cursor.description]
-        while True:
-            rows = cursor.fetchmany(batch_size)
-            if not rows:
-                break
-            yield [dict(zip(headers, row)) for row in rows]
+        try:
+            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
+            headers = [col[0] for col in cursor.description]
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
+        finally:
+            cursor.close()
 
     def insert_batch(
         self,
@@ -100,15 +145,81 @@ class MSSQLConnector(BaseConnector):
         query = f"INSERT INTO {self.quote_table(schema, table)} ({column_sql}) VALUES ({placeholders})"
         values = [[row.get(column) for column in columns] for row in records]
         cursor = self.connection.cursor()
-        # pyodbc fast_executemany can mis-size string buffers for mixed-length
-        # varchar/nvarchar batches and nvarchar(max), raising HY000 truncation or
-        # MemoryError before SQL Server sees the rows. Keep the reliable DB-API
-        # path as the default; callers can opt into the faster path once their
-        # driver/table shape is known to be safe.
-        cursor.fast_executemany = bool(self.config.options.get("fast_executemany", False))
-        cursor.executemany(query, values)
-        self.connection.commit()
+        try:
+            # pyodbc fast_executemany can mis-size string buffers for mixed-length
+            # varchar/nvarchar batches, raising HY000 truncation errors.  Off by default.
+            cursor.fast_executemany = bool(self.config.options.get("fast_executemany", False))
+            cursor.executemany(query, values)
+            if not self._in_transaction:
+                self.connection.commit()
+        finally:
+            cursor.close()
         return len(records)
+
+    def upsert_batch(
+        self,
+        schema: str | None,
+        table: str,
+        rows: Iterable[dict[str, Any]],
+        columns: Sequence[str],
+        primary_key: Sequence[str],
+    ) -> int:
+        """Native upsert using MERGE INTO ... USING VALUES ON ... WHEN MATCHED / NOT MATCHED.
+
+        The VALUES clause is split into sub-batches to stay under pyodbc's ~2100
+        parameter limit.  Each sub-batch is one MERGE statement.
+        """
+        records = list(rows)
+        if not records:
+            return 0
+        if not primary_key:
+            return self.insert_batch(schema, table, records, columns)
+        self.connect()
+        pk_set = set(primary_key)
+        non_pk = [col for col in columns if col not in pk_set]
+        target_ref = self.quote_table(schema, table)
+        col_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
+        source_col_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
+        on_clause = " AND ".join(
+            f"target.{quote_identifier(pk, self.quote_char)} = source.{quote_identifier(pk, self.quote_char)}"
+            for pk in primary_key
+        )
+        if non_pk:
+            update_clause = ", ".join(
+                f"target.{quote_identifier(col, self.quote_char)} = source.{quote_identifier(col, self.quote_char)}"
+                for col in non_pk
+            )
+            when_matched = f"WHEN MATCHED THEN UPDATE SET {update_clause}"
+        else:
+            when_matched = ""
+        insert_cols = col_sql
+        insert_src = ", ".join(f"source.{quote_identifier(col, self.quote_char)}" for col in columns)
+        when_not_matched = f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_src})"
+
+        # Sub-batch to stay under pyodbc's ~2100 parameter limit.
+        sub_size = max(1, 2000 // len(columns))
+        total = 0
+        for i in range(0, len(records), sub_size):
+            chunk = records[i:i + sub_size]
+            row_placeholders = ", ".join(["?"] * len(columns))
+            values_rows = ", ".join(f"({row_placeholders})" for _ in chunk)
+            merge_sql = (
+                f"MERGE INTO {target_ref} AS target "
+                f"USING (VALUES {values_rows}) AS source({source_col_sql}) "
+                f"ON ({on_clause}) "
+                f"{when_matched} "
+                f"{when_not_matched};"
+            )
+            params = [row.get(col) for row in chunk for col in columns]
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute(merge_sql, params)
+                if not self._in_transaction:
+                    self.connection.commit()
+            finally:
+                cursor.close()
+            total += len(chunk)
+        return total
 
     def get_columns(self, schema: str | None, table: str) -> list[Column]:
         rows = self.execute_query(
@@ -161,15 +272,16 @@ class MSSQLConnector(BaseConnector):
     def create_schema(self, schema: str | None) -> None:
         if not schema:
             return
-        # validate_identifier is also called upstream by parse_qualified_name,
-        # but we MUST call it here too because schema is embedded directly in a
-        # raw string literal inside the EXEC call — parameterisation is impossible
-        # for schema names in MSSQL DDL.  Removing this check would open a DDL
-        # injection vector even if upstream validation is present.
         validate_identifier(schema)
-        # CREATE SCHEMA must run in its own batch (no other statements on the same
-        # batch); EXEC() isolates it so it can follow other DDL in the same connection.
-        self.execute_query(f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC(N'CREATE SCHEMA {schema}')")
+        # CREATE SCHEMA must be the first statement in a T-SQL batch, so it is
+        # wrapped in EXEC sp_executesql.  The schema name is bracket-quoted after
+        # validate_identifier ensures it contains only safe identifier characters,
+        # giving two independent layers of injection prevention.
+        quoted = f"[{schema}]"
+        self.execute_query(
+            f"IF SCHEMA_ID(N'{schema}') IS NULL "
+            f"EXEC sp_executesql N'CREATE SCHEMA {quoted}'"
+        )
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
         definitions = [self._column_definition(column) for column in columns]
@@ -179,7 +291,6 @@ class MSSQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        # MSSQL uses "ALTER TABLE ADD col type" (no "COLUMN" keyword).
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
@@ -187,4 +298,3 @@ class MSSQLConnector(BaseConnector):
 
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
-

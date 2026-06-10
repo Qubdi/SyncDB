@@ -6,8 +6,11 @@ from typing import Any
 
 
 class TransferMode(str, Enum):
-    # Upsert-style: delete-then-insert for rows that match on primary key,
-    # append new rows.  Safe for incremental loads where source rows may be updated.
+    # Deletes target rows matching incoming primary keys, then inserts all source rows.
+    # Existing target rows with keys not present in the source batch are kept.
+    # Use for incremental loads where source rows may have been updated.
+    # Unlike UPSERT, no native ON CONFLICT / MERGE statement is used — the delete
+    # and insert are two separate statements within the same batch.
     APPEND = "append"
     # Pure append: insert every source row as-is and never delete/update existing
     # target rows.  Useful for immutable event streams, audit logs, and history tables.

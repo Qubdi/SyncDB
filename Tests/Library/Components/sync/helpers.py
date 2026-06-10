@@ -159,6 +159,38 @@ class MemoryConnector(BaseConnector):
         self.rows_by_table.setdefault((target_schema, target_table), []).extend(rows)
         return len(rows)
 
+    def apply_soft_deletes_sql(self, schema, table, pk_columns, seen_keys, deleted_at_value, batch_size=5000):
+        primary_key = [col.name for col in pk_columns]
+        count = 0
+        for row in self.rows_by_table.get((schema, table), []):
+            key = tuple(row.get(pk) for pk in primary_key)
+            if key not in seen_keys and row.get("deleted_at") is None:
+                row["deleted_at"] = deleted_at_value
+                count += 1
+        return count
+
+    def init_seen_keys_table(self, schema, table, pk_columns, uid):
+        keys_table = f"__syncdb_{table[:40]}_{uid}_keys"
+        self.rows_by_table[(schema, keys_table)] = []
+        self.columns_by_table[(schema, keys_table)] = list(pk_columns)
+        return keys_table
+
+    def apply_soft_deletes_from_keys_table(self, schema, table, keys_table, pk_columns, deleted_at_value):
+        primary_key = [col.name for col in pk_columns]
+        seen_key_rows = self.rows_by_table.get((schema, keys_table), [])
+        seen_keys = {tuple(row.get(pk) for pk in primary_key) for row in seen_key_rows}
+        count = 0
+        for row in self.rows_by_table.get((schema, table), []):
+            key = tuple(row.get(pk) for pk in primary_key)
+            if key not in seen_keys and row.get("deleted_at") is None:
+                row["deleted_at"] = deleted_at_value
+                count += 1
+        return count
+
+    def reconnect(self):
+        self.closed = False
+        self.connected = True
+
     def drop_table(self, schema, table):
         self.dropped_tables.append((schema, table))
         self.rows_by_table.pop((schema, table), None)

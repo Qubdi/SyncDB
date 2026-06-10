@@ -46,26 +46,72 @@ class MySQLConnector(BaseConnector):
                 import pymysql
             except ImportError as exc:
                 raise ImportError("mysql-connector-python or pymysql is required for MySQL connections") from exc
-            # pymysql uses connect_timeout (matches our config key directly).
             self.connection = pymysql.connect(**self._connection_kwargs())
+            self._apply_query_timeout()
             return
-        # mysql-connector-python uses connection_timeout, not connect_timeout;
-        # rename the key so the driver doesn't raise an unexpected keyword error.
         kwargs = self._connection_kwargs()
         if "connect_timeout" in kwargs:
             kwargs["connection_timeout"] = kwargs.pop("connect_timeout")
         self.connection = mysql_connector.connect(**kwargs)
+        self._apply_query_timeout()
+
+    def _apply_query_timeout(self) -> None:
+        """Set session-level max_execution_time when query_timeout is configured.
+
+        max_execution_time is in milliseconds (MySQL 5.7.8+).  On older MySQL
+        and MariaDB versions the variable does not exist; only that specific
+        database-level error is suppressed — all other errors propagate.
+        """
+        if not self.config.query_timeout:
+            return
+        try:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute(f"SET SESSION max_execution_time = {int(self.config.query_timeout * 1000)}")
+                self.connection.commit()
+            finally:
+                cursor.close()
+        except Exception as exc:
+            # Tolerate only "Unknown system variable" from engines that predate
+            # max_execution_time support.  Any other error (auth, network, syntax)
+            # must propagate so callers are aware of a broken session.
+            if "unknown system variable" not in str(exc).lower():
+                raise
 
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
         """Execute SQL and return rows as dictionaries using driver-neutral cursors."""
         self.connect()
         cursor = self.connection.cursor()
-        cursor.execute(query, tuple(params or []))
-        if not cursor.description:
-            self.connection.commit()
-            return []
-        columns = [col[0].lower() for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            cursor.execute(query, tuple(params or []))
+            if not cursor.description:
+                if not self._in_transaction:
+                    self.connection.commit()
+                return []
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def execute_query_batches(
+        self,
+        query: str,
+        params: Sequence[Any] | None = None,
+        batch_size: int = 5000,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Stream query results in batches using cursor.fetchmany()."""
+        self.connect()
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, tuple(params or []))
+            headers = [col[0] for col in cursor.description]
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(headers, row)) for row in rows]
+        finally:
+            cursor.close()
 
     def fetch_batches(
         self,
@@ -80,13 +126,16 @@ class MySQLConnector(BaseConnector):
         self.connect()
         names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
         cursor = self.connection.cursor()
-        cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-        headers = [col[0].lower() for col in cursor.description]
-        while True:
-            rows = cursor.fetchmany(batch_size)
-            if not rows:
-                break
-            yield [dict(zip(headers, row)) for row in rows]
+        try:
+            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
+            headers = [col[0] for col in cursor.description]
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(headers, row)) for row in rows]
+        finally:
+            cursor.close()
 
     def insert_batch(
         self,
@@ -104,8 +153,55 @@ class MySQLConnector(BaseConnector):
         query = f"INSERT INTO {self.quote_table(schema, table)} ({column_sql}) VALUES ({placeholders})"
         values = [[row.get(column) for column in columns] for row in records]
         cursor = self.connection.cursor()
-        cursor.executemany(query, values)
-        self.connection.commit()
+        try:
+            cursor.executemany(query, values)
+            if not self._in_transaction:
+                self.connection.commit()
+        finally:
+            cursor.close()
+        return len(records)
+
+    def upsert_batch(
+        self,
+        schema: str | None,
+        table: str,
+        rows: Iterable[dict[str, Any]],
+        columns: Sequence[str],
+        primary_key: Sequence[str],
+    ) -> int:
+        """Native upsert using INSERT ... ON DUPLICATE KEY UPDATE.
+
+        Non-PK columns are updated to the incoming VALUES on conflict.
+        When there are no non-PK columns, updates the first PK column to itself
+        (a no-op) so the statement remains valid SQL.
+        """
+        records = list(rows)
+        if not records:
+            return 0
+        if not primary_key:
+            return self.insert_batch(schema, table, records, columns)
+        self.connect()
+        column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        pk_set = set(primary_key)
+        non_pk = [col for col in columns if col not in pk_set]
+        update_targets = non_pk if non_pk else list(primary_key[:1])
+        updates = ", ".join(
+            f"{quote_identifier(col, self.quote_char)} = VALUES({quote_identifier(col, self.quote_char)})"
+            for col in update_targets
+        )
+        query = (
+            f"INSERT INTO {self.quote_table(schema, table)} ({column_sql}) VALUES ({placeholders}) "
+            f"ON DUPLICATE KEY UPDATE {updates}"
+        )
+        values = [[row.get(col) for col in columns] for row in records]
+        cursor = self.connection.cursor()
+        try:
+            cursor.executemany(query, values)
+            if not self._in_transaction:
+                self.connection.commit()
+        finally:
+            cursor.close()
         return len(records)
 
     def get_columns(self, schema: str | None, table: str) -> list[Column]:
@@ -117,7 +213,6 @@ class MySQLConnector(BaseConnector):
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
             """,
-            # MySQL has no server-level schema namespace; database IS the schema.
             [schema or self.config.database, table],
         )
         primary_keys = set(self.get_primary_keys(schema, table))
@@ -130,10 +225,6 @@ class MySQLConnector(BaseConnector):
                 numeric_scale=row["numeric_scale"],
                 nullable=str(row["is_nullable"]).upper() == "YES",
                 is_primary_key=row["column_name"] in primary_keys,
-                # data_type only returns the base type (e.g. "int"); column_type
-                # returns the full definition (e.g. "int unsigned"), so we extract
-                # the UNSIGNED flag from column_type for correct range-widening in
-                # SchemaMapper._to_postgresql and _to_mssql.
                 unsigned="unsigned" in str(row.get("column_type", "")).lower(),
             )
             for row in rows
@@ -160,7 +251,6 @@ class MySQLConnector(BaseConnector):
 
     def create_schema(self, schema: str | None) -> None:
         if schema:
-            # In MySQL a "schema" is a database; CREATE DATABASE is the equivalent.
             self.execute_query(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(schema, self.quote_char)}")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
@@ -171,7 +261,6 @@ class MySQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        # MySQL requires the "COLUMN" keyword in ALTER TABLE ADD COLUMN.
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
@@ -180,19 +269,8 @@ class MySQLConnector(BaseConnector):
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
 
-
     def _connection_kwargs(self) -> dict[str, Any]:
-        """Build a kwargs dict from the config, parsing a URL connection string if needed.
-
-        Accepted URL schemes: mysql://, mysql+pymysql://, mysql+mysqlconnector://
-        URL percent-encoding is decoded from username and password fields.
-
-        NOTE: The "mysql+driver" prefixes follow SQLAlchemy URL convention so that
-        connection strings written for SQLAlchemy-based tools (Alembic, dbt, etc.)
-        can be reused here without modification.  Only the host/port/user/password/db
-        components are extracted; SQLAlchemy query parameters (e.g. ?charset=utf8mb4)
-        are NOT parsed.  Pass those via DatabaseConfig.options instead.
-        """
+        """Build a kwargs dict from the config, parsing a URL connection string if needed."""
         if not self.config.connection_string:
             return self.config.as_connection_kwargs()
         parsed = urlparse(self.config.connection_string)
@@ -207,5 +285,4 @@ class MySQLConnector(BaseConnector):
             "connect_timeout": self.config.connect_timeout,
         }
         kwargs.update(self.config.options)
-        # Strip None and empty-string values; drivers raise on unexpected None kwargs.
         return {key: value for key, value in kwargs.items() if value is not None and value != ""}

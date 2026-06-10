@@ -8,11 +8,33 @@ run re-reads from the last persisted value and may re-process some rows.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from ..sql import quote_identifier, validate_identifier
+
+
+def _resolve_watermark_path(store: str | None) -> Path:
+    """Return a safe Path for the watermark store.
+
+    Relative paths must not contain '..' path components — that would allow a
+    job config to write watermarks outside the working directory.  Absolute
+    paths are accepted as-is (useful for production deployments that route
+    state files to a dedicated directory).
+    """
+    if not store:
+        return Path(".syncdb_watermarks.json")
+    path = Path(store)
+    if not path.is_absolute() and ".." in path.parts:
+        raise ValueError(
+            f"watermark_store '{store}' must not contain '..'. "
+            "Use an absolute path to reference a directory outside the working directory."
+        )
+    return path
 
 
 def load_watermark(spec: dict[str, Any]) -> dict[str, Any] | None:
@@ -22,7 +44,7 @@ def load_watermark(spec: dict[str, Any]) -> dict[str, Any] | None:
     if not column:
         return None
     validate_identifier(column)
-    path = Path(store or ".syncdb_watermarks.json")
+    path = _resolve_watermark_path(store)
     key = spec.get("watermark_key") or f"{spec['source']}->{spec['destination']}:{column}"
     values = read_watermark_file(path)
     return {"path": path, "key": key, "column": column, "value": values.get(key)}
@@ -38,13 +60,24 @@ def read_watermark_file(path: Path) -> dict[str, Any]:
 
 
 def save_watermark(config: dict[str, Any], value: Any) -> None:
-    """Persist the latest processed incremental value after a successful sync."""
+    """Persist the latest processed incremental value after a successful sync.
+
+    Uses a write-to-temp-then-rename strategy so a crash mid-write never leaves
+    the watermark file in a corrupt or empty state.
+    """
     path: Path = config["path"]
     values = read_watermark_file(path)
     values[config["key"]] = value.isoformat() if hasattr(value, "isoformat") else value
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(values, handle, indent=2, sort_keys=True)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".syncdb_watermarks_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(values, handle, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 def apply_watermark_filter(

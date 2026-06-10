@@ -7,23 +7,21 @@ memory; all checks push work down to the database engine.
 Supported checks:
   min_rows   - SELECT COUNT(*) must be >= threshold
   not_null   - SELECT COUNT(*) WHERE col IS NULL must be 0 for each column
-  unique     - SELECT COUNT(*) - COUNT(DISTINCT ...) must be 0 for each key set
+  unique     - duplicate-row count must be 0 for each key set
   range      - SELECT MIN/MAX must be within [min, max] bounds for each column
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from ..connectors.base import BaseConnector
 from ..sql import quote_identifier, validate_identifier
 from .models import TableSyncResult
 
-if TYPE_CHECKING:
-    from ..connectors.base import BaseConnector
-
 
 def validate_expectations(
-    target: "BaseConnector",
+    target: BaseConnector,
     schema: str | None,
     table: str,
     expect: dict[str, Any] | None,
@@ -35,13 +33,12 @@ def validate_expectations(
         return
     failures: list[str] = []
     tbl = target.quote_table(schema, table)
-    ph = target.placeholder
     q = target.quote_char
 
     min_rows = expect.get("min_rows")
     if min_rows is not None:
         rows = target.execute_query(f"SELECT COUNT(*) AS n FROM {tbl}")
-        count = int((rows[0].get("n") or rows[0].get("N") or 0))
+        count = int((rows[0].get("n") or rows[0].get("N") or 0) if rows else 0)
         if count < int(min_rows):
             failures.append(f"expected at least {min_rows} rows, found {count}")
 
@@ -51,7 +48,7 @@ def validate_expectations(
         rows = target.execute_query(
             f"SELECT COUNT(*) AS n FROM {tbl} WHERE {col_ref} IS NULL"
         )
-        null_count = int((rows[0].get("n") or rows[0].get("N") or 0))
+        null_count = int((rows[0].get("n") or rows[0].get("N") or 0) if rows else 0)
         if null_count:
             failures.append(f"{column} has {null_count} null values")
 
@@ -60,13 +57,23 @@ def validate_expectations(
         for col in columns:
             validate_identifier(col)
         col_refs = ", ".join(quote_identifier(c, q) for c in columns)
-        # COUNT(*) - COUNT(DISTINCT ...) equals the number of duplicate rows.
-        # DISTINCT on multiple columns requires a subquery because SQL does not
-        # support COUNT(DISTINCT col1, col2) in a standard way across all engines.
-        rows = target.execute_query(
-            f"SELECT COUNT(*) AS total, COUNT(*) - COUNT(DISTINCT {col_refs}) AS dups FROM {tbl}"
-        )
-        dups = int((rows[0].get("dups") or rows[0].get("DUPS") or 0))
+
+        if len(columns) == 1:
+            # Single-column: COUNT(*) - COUNT(DISTINCT col) is standard SQL on all engines.
+            rows = target.execute_query(
+                f"SELECT COUNT(*) - COUNT(DISTINCT {col_refs}) AS dups FROM {tbl}"
+            )
+        else:
+            # Multi-column: COUNT(DISTINCT col1, col2) is not standard SQL — MySQL rejects
+            # it and other engines vary.  Use a portable subquery instead.
+            rows = target.execute_query(
+                f"SELECT (SELECT COUNT(*) FROM {tbl}) - "
+                f"(SELECT COUNT(*) FROM "
+                f"(SELECT DISTINCT {col_refs} FROM {tbl}) AS __syncdb_distinct) "
+                f"AS dups"
+            )
+
+        dups = int((rows[0].get("dups") or rows[0].get("DUPS") or 0) if rows else 0)
         if dups:
             failures.append(f"{', '.join(columns)} has {dups} duplicate rows")
 

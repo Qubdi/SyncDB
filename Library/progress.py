@@ -25,7 +25,7 @@ class ProgressMode(str, Enum):
     NONE = "none"
 
     @classmethod
-    def _missing_(cls, value: object) -> "ProgressMode | None":
+    def _missing_(cls, value: object) -> ProgressMode | None:
         # Accept case-insensitive strings so YAML/JSON job configs can use
         # "ONE_LINE" or "one_line" interchangeably without callers needing to
         # normalise before constructing the enum.
@@ -115,7 +115,7 @@ class ProgressReporter:
         Format: label  [=======>...........]  45%  4,500 / 10,000  1.2s
         """
         padded_label = f"{label:<{self.label_width}}" if self.label_width else label
-        elapsed_str = f"  {_format_elapsed(elapsed)}" if elapsed is not None else ""
+        elapsed_str = f"  {format_elapsed(elapsed)}" if elapsed is not None else ""
         if not total or total <= 0:
             return f"{padded_label}  {current:,} rows{elapsed_str}"
         ratio = min(max(current / total, 0.0), 1.0)
@@ -128,7 +128,7 @@ class ProgressReporter:
         return f"{padded_label}  [{bar}]  {percent:3d}%  {current:>10,} / {total:>10,}{elapsed_str}"
 
 
-def _format_elapsed(seconds: float) -> str:
+def format_elapsed(seconds: float) -> str:
     """Format a duration as '1.2s', '1m 2.3s', or '1h 3m 4.5s'."""
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -137,3 +137,8 @@ def _format_elapsed(seconds: float) -> str:
         return f"{int(m)}m {s:.1f}s"
     h, m = divmod(m, 60)
     return f"{int(h)}h {int(m)}m {s:.1f}s"
+
+
+# Backward-compatible alias — internal code that already imports the private
+# name continues to work without changes.
+_format_elapsed = format_elapsed

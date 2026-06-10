@@ -36,35 +36,61 @@ class PostgresConnector(BaseConnector):
             import psycopg2.extras
         except ImportError as exc:
             raise ImportError("psycopg2 is required for PostgreSQL connections") from exc
-        # psycopg2 reads JSONB/JSON dict columns as Python dicts but has no built-in
-        # adapter to serialize them back. Register dict → Json so INSERT/UPDATE of
-        # JSONB object values works transparently.
-        # Lists are intentionally left to psycopg2's native ListAdapter, which
-        # produces PostgreSQL array syntax ({a,b,c}) required for text[], int[], etc.
         psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
         if self.config.connection_string:
-            # psycopg2 accepts libpq connection strings or DSNs directly.
-            # connect_timeout is passed as a separate kwarg because some DSN
-            # forms don't include it and psycopg2 accepts it outside the DSN.
-            self.connection = psycopg2.connect(self.config.connection_string, connect_timeout=self.config.connect_timeout)
+            self.connection = psycopg2.connect(
+                self.config.connection_string,
+                connect_timeout=self.config.connect_timeout,
+            )
         else:
             kwargs = self.config.as_connection_kwargs()
             # psycopg2 uses "dbname" where every other driver uses "database".
-            # This rename must happen here, not in DatabaseConfig, because
-            # other connectors (MySQL, MSSQL) correctly expect "database".
             kwargs["dbname"] = kwargs.pop("database")
             self.connection = psycopg2.connect(**kwargs)
+        # Enforce query execution timeout via session-level statement_timeout.
+        # connect_timeout only covers the connection handshake; statement_timeout
+        # cancels any query that runs longer than the limit (value in milliseconds).
+        if self.config.query_timeout:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute(f"SET statement_timeout = {int(self.config.query_timeout * 1000)}")
+                self.connection.commit()
+            finally:
+                cursor.close()
 
     def execute_query(self, query: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
         self.connect()
         cursor = self.connection.cursor()
-        cursor.execute(query, tuple(params or []))
-        if not cursor.description:
-            # DML/DDL without a result set; commit to make the change visible.
-            self.connection.commit()
-            return []
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            cursor.execute(query, tuple(params or []))
+            if not cursor.description:
+                if not self._in_transaction:
+                    self.connection.commit()
+                return []
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def execute_query_batches(
+        self,
+        query: str,
+        params: Sequence[Any] | None = None,
+        batch_size: int = 5000,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Stream query results in batches using cursor.fetchmany()."""
+        self.connect()
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, tuple(params or []))
+            headers = [col[0] for col in cursor.description]
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(headers, row)) for row in rows]
+        finally:
+            cursor.close()
 
     def fetch_batches(
         self,
@@ -79,13 +105,16 @@ class PostgresConnector(BaseConnector):
         self.connect()
         names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
         cursor = self.connection.cursor()
-        cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-        headers = [col[0] for col in cursor.description]
-        while True:
-            rows = cursor.fetchmany(batch_size)
-            if not rows:
-                break
-            yield [dict(zip(headers, row)) for row in rows]
+        try:
+            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
+            headers = [col[0] for col in cursor.description]
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(headers, row)) for row in rows]
+        finally:
+            cursor.close()
 
     def insert_batch(
         self,
@@ -94,17 +123,79 @@ class PostgresConnector(BaseConnector):
         rows: Iterable[dict[str, Any]],
         columns: Sequence[str],
     ) -> int:
+        """Bulk-insert rows using psycopg2.extras.execute_values.
+
+        execute_values sends the entire batch in a single multi-row INSERT statement
+        (one network round-trip) rather than one statement per row, which is
+        dramatically faster for large batches than executemany().
+        """
         records = list(rows)
         if not records:
             return 0
         self.connect()
+        from psycopg2.extras import execute_values
         column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        query = f"INSERT INTO {self.quote_table(schema, table)} ({column_sql}) VALUES ({placeholders})"
-        values = [[row.get(column) for column in columns] for row in records]
+        table_ref = self.quote_table(schema, table)
+        values = [tuple(row.get(col) for col in columns) for row in records]
         cursor = self.connection.cursor()
-        cursor.executemany(query, values)
-        self.connection.commit()
+        try:
+            execute_values(
+                cursor,
+                f"INSERT INTO {table_ref} ({column_sql}) VALUES %s",
+                values,
+                page_size=len(values),
+            )
+            if not self._in_transaction:
+                self.connection.commit()
+        finally:
+            cursor.close()
+        return len(records)
+
+    def upsert_batch(
+        self,
+        schema: str | None,
+        table: str,
+        rows: Iterable[dict[str, Any]],
+        columns: Sequence[str],
+        primary_key: Sequence[str],
+    ) -> int:
+        """Native upsert using INSERT ... ON CONFLICT DO UPDATE via execute_values.
+
+        Non-PK columns are updated to the EXCLUDED (incoming) values on conflict.
+        PK-only tables (no non-PK columns) use DO NOTHING to avoid a no-op update.
+        """
+        records = list(rows)
+        if not records:
+            return 0
+        if not primary_key:
+            return self.insert_batch(schema, table, records, columns)
+        self.connect()
+        from psycopg2.extras import execute_values
+        column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
+        pk_sql = ", ".join(quote_identifier(pk, self.quote_char) for pk in primary_key)
+        pk_set = set(primary_key)
+        non_pk = [col for col in columns if col not in pk_set]
+        if non_pk:
+            updates = ", ".join(
+                f"{quote_identifier(col, self.quote_char)} = EXCLUDED.{quote_identifier(col, self.quote_char)}"
+                for col in non_pk
+            )
+            conflict_action = f"DO UPDATE SET {updates}"
+        else:
+            conflict_action = "DO NOTHING"
+        table_ref = self.quote_table(schema, table)
+        query = (
+            f"INSERT INTO {table_ref} ({column_sql}) VALUES %s "
+            f"ON CONFLICT ({pk_sql}) {conflict_action}"
+        )
+        values = [tuple(row.get(col) for col in columns) for row in records]
+        cursor = self.connection.cursor()
+        try:
+            execute_values(cursor, query, values, page_size=len(values))
+            if not self._in_transaction:
+                self.connection.commit()
+        finally:
+            cursor.close()
         return len(records)
 
     def get_columns(self, schema: str | None, table: str) -> list[Column]:
@@ -167,8 +258,6 @@ class PostgresConnector(BaseConnector):
 
     def create_schema(self, schema: str | None) -> None:
         if schema:
-            # IF NOT EXISTS avoids an error when two parallel processes both try
-            # to create the same schema on the first run.
             self.execute_query(f"CREATE SCHEMA IF NOT EXISTS {quote_identifier(schema, self.quote_char)}")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
@@ -186,4 +275,3 @@ class PostgresConnector(BaseConnector):
 
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
-

@@ -12,6 +12,9 @@ Internal layout
   watermark.py  — Incremental high-watermark tracking (load, save, filter)
   quality.py    — Data-quality expectation checks (min_rows, not_null, unique, range)
   reporting.py  — ASCII summary table rendering (emit_summary)
+  retry.py      — with_retries(): exponential backoff with full jitter
+  inference.py  — infer_columns(): Python-value to SQL-type mapping for file imports
+  staging.py    — create_staging_table() / replace_from_staging() helpers
 """
 
 from .core import SyncDB

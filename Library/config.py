@@ -85,9 +85,15 @@ class DatabaseConfig:
     port: int | None = None
     database: str | None = None
     user: str | None = None
-    password: str | None = None
+    password: str | None = field(default=None, repr=False)
     default_schema: str | None = None
     connect_timeout: int = 30
+    # Maximum seconds a single query may run before the engine cancels it.
+    # None means no limit beyond the driver default.
+    # Applied per-engine: PostgreSQL uses SET statement_timeout (ms),
+    # MSSQL uses the pyodbc query timeout, MySQL uses SET SESSION max_execution_time (ms).
+    # SQLite has no query execution timeout and ignores this field.
+    query_timeout: int | None = None
     # Engine-specific pass-through options forwarded verbatim to the driver.
     # Common uses per engine:
     #   MSSQL:      {"driver": "{ODBC Driver 18 for SQL Server}", "TrustServerCertificate": "no"}
@@ -111,6 +117,8 @@ class DatabaseConfig:
 
         if self.connect_timeout <= 0:
             raise ValueError("connect_timeout must be greater than zero")
+        if self.query_timeout is not None and self.query_timeout <= 0:
+            raise ValueError("query_timeout must be greater than zero when set")
 
         # A raw connection_string is accepted as-is; individual credential fields
         # are only required when no connection_string was provided.
@@ -191,6 +199,8 @@ class DatabaseConfig:
             kwargs["default_schema"] = schema
         if timeout_str := _get("CONNECT_TIMEOUT"):
             kwargs["connect_timeout"] = int(timeout_str)
+        if query_timeout_str := _get("QUERY_TIMEOUT"):
+            kwargs["query_timeout"] = int(query_timeout_str)
         return cls(**kwargs)
 
     @property
