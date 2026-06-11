@@ -254,6 +254,167 @@ class KeysTableDeleteTests(unittest.TestCase):
         self.assertEqual(affected, 2)
 
 
+class WatermarkLockingTests(unittest.TestCase):
+    def test_concurrent_saves_to_same_store_preserve_all_keys(self):
+        """The cross-process/thread lock must serialise read-modify-write."""
+        import threading
+
+        from syncdb.sync.watermark import read_watermark_file, save_watermark
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = Path(tmp.name) / "wm.json"
+
+        def writer(key: str) -> None:
+            for i in range(20):
+                save_watermark({"path": store, "key": key}, i)
+
+        threads = [threading.Thread(target=writer, args=(f"k{n}",)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        values = read_watermark_file(store)
+        self.assertEqual(sorted(values), ["k0", "k1", "k2", "k3"],
+                         "no writer's key may be lost to an interleaved write")
+        self.assertTrue(all(v == 19 for v in values.values()))
+        self.assertTrue(store.with_suffix(store.suffix + ".lock").exists())
+
+
+class StreamingImportTests(unittest.TestCase):
+    def _write_csv(self, path: Path, count: int) -> None:
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["id", "v"])
+            writer.writeheader()
+            writer.writerows({"id": i, "v": f"r{i}"} for i in range(count))
+
+    def test_read_streaming_csv_yields_batches(self):
+        from syncdb import FileTransfer
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "data.csv"
+        self._write_csv(path, 25)
+        batches = list(FileTransfer().read_streaming(path, batch_size=10))
+        self.assertEqual([len(b) for b in batches], [10, 10, 5])
+        self.assertEqual(batches[0][0], {"id": "0", "v": "r0"})
+
+    def test_read_streaming_excel_yields_batches(self):
+        from syncdb import FileTransfer
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "data.xlsx"
+        transfer = FileTransfer()
+        transfer.write([{"id": i, "v": f"r{i}"} for i in range(25)], path)
+        batches = list(transfer.read_streaming(path, batch_size=10))
+        self.assertEqual([len(b) for b in batches], [10, 10, 5])
+        self.assertEqual(batches[0][0], {"id": 0, "v": "r0"})
+
+    def test_read_streaming_parquet_yields_batches(self):
+        from syncdb import FileTransfer
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "data.parquet"
+        transfer = FileTransfer()
+        transfer.write([{"id": i, "v": f"r{i}"} for i in range(25)], path)
+        batches = list(transfer.read_streaming(path, batch_size=10))
+        self.assertEqual(sum(len(b) for b in batches), 25)
+        self.assertTrue(all(len(b) <= 10 for b in batches))
+
+    def test_import_empty_csv_into_missing_table_raises(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "empty.csv"
+        self._write_csv(path, 0)
+        target = MemoryConnector("sqlite", None)
+        sync = make_sync(None, target)
+        with self.assertRaises(ValueError):
+            sync.import_file_to_table(path, "dst")
+
+    def test_import_empty_csv_into_existing_table_returns_zero(self):
+        from syncdb import Column as Col
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "empty.csv"
+        self._write_csv(path, 0)
+        target = MemoryConnector(
+            "sqlite", None,
+            columns_by_table={(None, "dst"): [Col("id", "text")]},
+        )
+        sync = make_sync(None, target)
+        self.assertEqual(sync.import_file_to_table(path, "dst"), 0)
+
+
+class DatabaseWatermarkStoreTests(unittest.TestCase):
+    def _seed_source(self, tmp: Path) -> SQLiteConnector:
+        source = _sqlite(str(tmp / "src.db"))
+        source.create_table(None, "src", [
+            Column("id", "integer", nullable=False, is_primary_key=True),
+            Column("updated_at", "text"),
+        ])
+        source.insert_batch(
+            None, "src",
+            [{"id": 1, "updated_at": "2026-01-01"}, {"id": 2, "updated_at": "2026-01-02"}],
+            ["id", "updated_at"],
+        )
+        return source
+
+    def test_watermark_persists_in_target_table_and_filters_second_run(self):
+        tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp_dir.cleanup)
+        tmp = Path(tmp_dir.name)
+        spec = {
+            "src": {
+                "source": "src", "destination": "dst", "mode": "append",
+                "primary_key": ["id"],
+                "incremental_column": "updated_at",
+                "watermark_storage": "database",
+            }
+        }
+
+        source = self._seed_source(tmp)
+        self.addCleanup(source.close)
+        target = _sqlite(str(tmp / "dst.db"))
+        self.addCleanup(target.close)
+
+        first = make_sync(source, target).sync_tables(spec)[0]
+        self.assertEqual(first.rows_written, 2)
+
+        # The watermark must live in a table on the target, not a local file.
+        target.connect()
+        wm_rows = target.execute_query('SELECT wm_key, wm_value FROM "__syncdb_watermarks"')
+        self.assertEqual(len(wm_rows), 1)
+        self.assertIn("2026-01-02", wm_rows[0]["wm_value"])
+        target.close()
+
+        # Second run: nothing newer than the stored watermark → zero rows read.
+        source.connect()
+        second = make_sync(source, target).sync_tables(spec)[0]
+        self.assertEqual(second.rows_read, 0)
+
+    def test_database_storage_requires_target(self):
+        from syncdb.sync.watermark import load_watermark
+
+        with self.assertRaises(ValueError):
+            load_watermark({
+                "source": "s", "destination": "d",
+                "incremental_column": "c", "watermark_storage": "database",
+            })
+
+    def test_unknown_storage_rejected(self):
+        from syncdb.sync.watermark import load_watermark
+
+        with self.assertRaises(ValueError):
+            load_watermark({
+                "source": "s", "destination": "d",
+                "incremental_column": "c", "watermark_storage": "redis",
+            })
+
+
 class WhereClauseHardeningTests(unittest.TestCase):
     def test_parenthesised_keywords_blocked(self):
         for clause in (

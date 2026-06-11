@@ -36,6 +36,12 @@ ruff format Library/
 
 # Type check
 mypy Library/
+
+# Measure coverage against the 90% gate (currently ~93%)
+pytest Tests/Library/Components --cov=Library
+
+# Install local quality hooks (ruff on commit; mypy + component tests on push)
+pre-commit install
 ```
 
 ## Architecture

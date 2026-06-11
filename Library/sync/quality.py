@@ -45,9 +45,7 @@ def validate_expectations(
     for column in expect.get("not_null", []) or []:
         validate_identifier(column)
         col_ref = quote_identifier(column, q)
-        rows = target.execute_query(
-            f"SELECT COUNT(*) AS n FROM {tbl} WHERE {col_ref} IS NULL"
-        )
+        rows = target.execute_query(f"SELECT COUNT(*) AS n FROM {tbl} WHERE {col_ref} IS NULL")
         null_count = int(result_scalar(rows, "n"))
         if null_count:
             failures.append(f"{column} has {null_count} null values")
@@ -60,9 +58,7 @@ def validate_expectations(
 
         if len(columns) == 1:
             # Single-column: COUNT(*) - COUNT(DISTINCT col) is standard SQL on all engines.
-            rows = target.execute_query(
-                f"SELECT COUNT(*) - COUNT(DISTINCT {col_refs}) AS dups FROM {tbl}"
-            )
+            rows = target.execute_query(f"SELECT COUNT(*) - COUNT(DISTINCT {col_refs}) AS dups FROM {tbl}")
         else:
             # Multi-column: COUNT(DISTINCT col1, col2) is not standard SQL — MySQL rejects
             # it and other engines vary.  Use a portable subquery instead.

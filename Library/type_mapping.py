@@ -25,6 +25,7 @@ class Column:
     not carry those modifiers (e.g. integer).  unsigned is MySQL-specific and is
     preserved through the mapping to allow correct range-widening decisions.
     """
+
     name: str
     data_type: str
     nullable: bool = True
@@ -116,7 +117,11 @@ class SchemaMapper:
         it so the generated CREATE/ALTER TABLE DDL is complete.
         "character varying" is normalised to "varchar" for consistency in output DDL.
         """
-        if data_type in {"varchar", "nvarchar", "char", "nchar", "character varying"} and char_length and char_length > 0:
+        if (
+            data_type in {"varchar", "nvarchar", "char", "nchar", "character varying"}
+            and char_length
+            and char_length > 0
+        ):
             normalized = "varchar" if data_type == "character varying" else data_type
             return f"{normalized}({char_length})"
         if data_type in {"decimal", "numeric"} and precision is not None and scale is not None:
@@ -169,7 +174,17 @@ class SchemaMapper:
             return self._varchar(char_length, "char", unbounded="char")
         if data_type in {"text", "ntext", "longtext", "mediumtext", "tinytext"}:
             return "text"
-        if data_type in {"binary", "varbinary", "image", "bytea", "blob", "longblob", "mediumblob", "tinyblob", "rowversion"}:
+        if data_type in {
+            "binary",
+            "varbinary",
+            "image",
+            "bytea",
+            "blob",
+            "longblob",
+            "mediumblob",
+            "tinyblob",
+            "rowversion",
+        }:
             return "bytea"
         if data_type in {"json", "jsonb"}:
             # Always use jsonb for PostgreSQL; it is indexed and queried more efficiently.
@@ -221,7 +236,19 @@ class SchemaMapper:
             return "date"
         if data_type == "time":
             return "time"
-        if data_type in {"varchar", "nvarchar", "character varying", "char", "nchar", "text", "json", "jsonb", "xml", "enum", "set"}:
+        if data_type in {
+            "varchar",
+            "nvarchar",
+            "character varying",
+            "char",
+            "nchar",
+            "text",
+            "json",
+            "jsonb",
+            "xml",
+            "enum",
+            "set",
+        }:
             # Always use nvarchar (Unicode) for MSSQL to avoid data loss when the
             # source contains multibyte characters. Unbounded maps to nvarchar(max).
             return self._varchar(char_length, "nvarchar", unbounded="nvarchar(max)")
@@ -291,11 +318,33 @@ class SchemaMapper:
         If strict typing matters, create the SQLite table manually with
         STRICT mode (SQLite 3.37+) before syncing.
         """
-        if data_type in {"bigint", "bigserial", "int", "integer", "mediumint", "serial", "smallint", "tinyint", "bit", "boolean", "bool"}:
+        if data_type in {
+            "bigint",
+            "bigserial",
+            "int",
+            "integer",
+            "mediumint",
+            "serial",
+            "smallint",
+            "tinyint",
+            "bit",
+            "boolean",
+            "bool",
+        }:
             return "integer"
         if data_type in {"decimal", "numeric", "money", "smallmoney", "float", "double", "double precision", "real"}:
             return "real"
-        if data_type in {"binary", "varbinary", "image", "bytea", "blob", "longblob", "mediumblob", "tinyblob", "rowversion"}:
+        if data_type in {
+            "binary",
+            "varbinary",
+            "image",
+            "bytea",
+            "blob",
+            "longblob",
+            "mediumblob",
+            "tinyblob",
+            "rowversion",
+        }:
             return "blob"
         return "text"
 

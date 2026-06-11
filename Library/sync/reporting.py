@@ -32,10 +32,22 @@ def emit_summary(results: list[TableSyncResult], verbose: str | None, stream: IO
         ]
     else:
         headers = [
-            "name", "source", "destination", "mode",
-            "read", "written", "soft deleted", "batches",
-            "schema", "table", "added", "dropped",
-            "checks", "watermark", "dry run", "time",
+            "name",
+            "source",
+            "destination",
+            "mode",
+            "read",
+            "written",
+            "soft deleted",
+            "batches",
+            "schema",
+            "table",
+            "added",
+            "dropped",
+            "checks",
+            "watermark",
+            "dry run",
+            "time",
         ]
         rows = [
             [
@@ -83,7 +95,5 @@ def _write_table(headers: list[str], rows: list[list[str]], stream: IO[str]) -> 
     stream.write(header_line)
     stream.write(separator)
     for row in rows:
-        stream.write(
-            "| " + " | ".join(value.ljust(widths[index]) for index, value in enumerate(row)) + " |\n"
-        )
+        stream.write("| " + " | ".join(value.ljust(widths[index]) for index, value in enumerate(row)) + " |\n")
     stream.write(separator)

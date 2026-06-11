@@ -88,6 +88,7 @@ class PostgresConnector(BaseConnector):
         batch_size regardless of table size.
         """
         import uuid
+
         cursor = self.connection.cursor(name=f"syncdb_{uuid.uuid4().hex[:12]}")
         cursor.itersize = batch_size
         return cursor
@@ -110,6 +111,7 @@ class PostgresConnector(BaseConnector):
             return 0
         self.connect()
         from psycopg2.extras import execute_values
+
         column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
         table_ref = self.quote_table(schema, table)
         values = [tuple(row.get(col) for col in columns) for row in records]
@@ -147,6 +149,7 @@ class PostgresConnector(BaseConnector):
             return self.insert_batch(schema, table, records, columns)
         self.connect()
         from psycopg2.extras import execute_values
+
         column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
         pk_sql = ", ".join(quote_identifier(pk, self.quote_char) for pk in primary_key)
         pk_set = set(primary_key)
@@ -160,10 +163,7 @@ class PostgresConnector(BaseConnector):
         else:
             conflict_action = "DO NOTHING"
         table_ref = self.quote_table(schema, table)
-        query = (
-            f"INSERT INTO {table_ref} ({column_sql}) VALUES %s "
-            f"ON CONFLICT ({pk_sql}) {conflict_action}"
-        )
+        query = f"INSERT INTO {table_ref} ({column_sql}) VALUES %s ON CONFLICT ({pk_sql}) {conflict_action}"
         values = [tuple(row.get(col) for col in columns) for row in records]
         cursor = self.connection.cursor()
         try:
@@ -244,10 +244,14 @@ class PostgresConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}")
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}"
+        )
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}")
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
+        )
 
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")

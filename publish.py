@@ -9,12 +9,18 @@ Usage
   python publish.py 1.2.3          # set exact version
   python publish.py patch --dry-run  # build but do not upload
   python publish.py patch --no-tag   # skip git tag
-  python publish.py patch --no-test  # skip test run
+  python publish.py patch --yes --push  # non-interactive (automation)
+
+The quality gate (component tests + ruff + mypy) ALWAYS runs before a release.
+There is deliberately no flag to skip it; the only escape hatch is the
+environment variable SYNCDB_PUBLISH_SKIP_GATE=1, which prints a loud warning
+so it cannot be used silently.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -86,7 +92,8 @@ def main() -> None:
     parser.add_argument("version", help="patch | minor | major | x.y.z")
     parser.add_argument("--dry-run", action="store_true", help="Build but do not upload to PyPI")
     parser.add_argument("--no-tag", action="store_true", help="Skip creating a git tag")
-    parser.add_argument("--no-test", action="store_true", help="Skip running the test suite")
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompts (automation)")
+    parser.add_argument("--push", action="store_true", help="Push the release tag without prompting")
     args = parser.parse_args()
 
     require_tool("twine")
@@ -95,23 +102,28 @@ def main() -> None:
     new = bump_version(current, args.version)
 
     print(f"\nVersion: {current}  ->  {new}")
-    if not args.dry_run:
+    if not args.dry_run and not args.yes:
         confirm = input("Continue? [y/N] ").strip().lower()
         if confirm != "y":
             sys.exit("Aborted.")
 
-    # 1. Run tests
-    if not args.no_test:
-        print("\n--- Running unit tests ---")
-        run([sys.executable, "-m", "pytest",
-             "Tests/Library/Components/config",
-             "Tests/Library/Components/connectors",
-             "Tests/Library/Components/files",
-             "Tests/Library/Components/progress",
-             "Tests/Library/Components/sql",
-             "Tests/Library/Components/sync",
-             "Tests/Library/Components/type_mapping",
-             "-q"])
+    # 1. Quality gate: tests + lint + types.  Always runs — a release that
+    # skips its own gate is how regressions ship.  The env-var escape hatch
+    # exists for genuine emergencies only and announces itself loudly.
+    if os.environ.get("SYNCDB_PUBLISH_SKIP_GATE") == "1":
+        print(
+            "\n" + "!" * 70
+            + "\n!!  SYNCDB_PUBLISH_SKIP_GATE=1 — RELEASING WITHOUT RUNNING THE"
+            + "\n!!  TEST/LINT/TYPE GATE.  Do not do this for a normal release."
+            + "\n" + "!" * 70
+        )
+    else:
+        print("\n--- Quality gate: component tests ---")
+        run([sys.executable, "-m", "pytest", "Tests/Library/Components", "-q"])
+        print("\n--- Quality gate: ruff ---")
+        run([sys.executable, "-m", "ruff", "check", "Library/"])
+        print("\n--- Quality gate: mypy ---")
+        run([sys.executable, "-m", "mypy", "Library/"])
 
     # 2. Bump version in pyproject.toml
     write_version(new)
@@ -127,9 +139,14 @@ def main() -> None:
     print("\n--- Building ---")
     run([sys.executable, "-m", "build"])
 
-    # 5. Verify package
+    # 5. Verify package.  Paths are stringified explicitly: Path objects in the
+    # argv list crash the command logging on Windows ("dist/*" globbing is also
+    # shell-dependent, so expand it here for all platforms).
+    artifacts = sorted(str(p) for p in dist_dir.glob("*"))
+    if not artifacts:
+        sys.exit("Build produced no artifacts in dist/")
     print("\n--- Checking package ---")
-    run(["twine", "check", "dist/*"] if sys.platform != "win32" else ["twine", "check", *dist_dir.glob("*")])
+    run(["twine", "check", *artifacts])
 
     if args.dry_run:
         print("\nDry run complete. Artifacts in dist/. Version NOT uploaded.")
@@ -137,7 +154,7 @@ def main() -> None:
 
     # 6. Upload
     print("\n--- Uploading to PyPI ---")
-    run(["twine", "upload", *dist_dir.glob("*")])
+    run(["twine", "upload", *artifacts])
 
     # 7. Git tag
     if not args.no_tag:
@@ -146,8 +163,10 @@ def main() -> None:
         run(["git", "commit", "-m", f"release {tag}"], check=False)
         run(["git", "tag", tag], check=False)
         print(f"\nTagged: {tag}")
-        push = input("Push tag to remote? [y/N] ").strip().lower()
-        if push == "y":
+        push = args.push
+        if not push and not args.yes:
+            push = input("Push tag to remote? [y/N] ").strip().lower() == "y"
+        if push:
             run(["git", "push", "--follow-tags"], check=False)
 
     print(f"\nPublished Qubdi-SyncDB {new} to PyPI.")

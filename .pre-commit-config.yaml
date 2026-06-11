@@ -1,0 +1,36 @@
+# Local quality gates — install once with:  pip install pre-commit && pre-commit install
+# Mirrors the manual commands in CLAUDE.md (ruff check/format Library/, mypy Library/)
+# so nothing correctness-sensitive lands in a commit unchecked.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+        files: ^Library/
+
+  - repo: local
+    hooks:
+      - id: mypy-library
+        name: mypy --strict on Library/
+        entry: python -m mypy Library/
+        language: system
+        pass_filenames: false
+        files: ^Library/
+
+      - id: component-tests
+        name: component test suite (fast, no DB)
+        entry: python -m pytest Tests/Library/Components -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      # Dependency vulnerability scan.  Manual stage so it doesn't slow every
+      # commit — run before releases with:  pre-commit run pip-audit --hook-stage manual
+      - id: pip-audit
+        name: pip-audit dependency scan
+        entry: python -m pip_audit
+        language: system
+        pass_filenames: false
+        stages: [manual]

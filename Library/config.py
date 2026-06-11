@@ -141,8 +141,7 @@ class DatabaseConfig:
         ]
         if missing:
             raise ValueError(
-                "connection_string or host/database/user credentials are required; "
-                f"missing: {', '.join(missing)}"
+                f"connection_string or host/database/user credentials are required; missing: {', '.join(missing)}"
             )
 
     @classmethod
@@ -183,9 +182,7 @@ class DatabaseConfig:
 
         engine = _get("ENGINE")
         if not engine:
-            raise ValueError(
-                f"Environment variable {prefix}_ENGINE is required for DatabaseConfig.from_env()"
-            )
+            raise ValueError(f"Environment variable {prefix}_ENGINE is required for DatabaseConfig.from_env()")
         kwargs: dict[str, Any] = {"engine": engine}
         if conn_str := _get("CONNECTION_STRING"):
             kwargs["connection_string"] = conn_str

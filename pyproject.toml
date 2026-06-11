@@ -38,6 +38,8 @@ dev        = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
+    "pre-commit>=3.5",
+    "pip-audit>=2.7",
 ]
 
 [tool.setuptools]

@@ -106,6 +106,7 @@ class MySQLConnector(BaseConnector):
         """
         if type(self.connection).__module__.startswith("pymysql"):
             import pymysql.cursors
+
             return self.connection.cursor(pymysql.cursors.SSCursor)
         return self.connection.cursor()
 
@@ -233,10 +234,14 @@ class MySQLConnector(BaseConnector):
         self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
 
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}")
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}"
+        )
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}")
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
+        )
 
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import fnmatch
+import itertools
 import json
 import logging
 import sys
@@ -30,7 +31,14 @@ from ..connections import create_connector
 from ..connectors.base import BaseConnector
 from ..files import FileTransfer
 from ..progress import ProgressMode, ProgressReporter
-from ..sql import build_order_by, build_where_clause, parse_qualified_name, validate_identifier, validate_type
+from ..sql import (
+    QualifiedName,
+    build_order_by,
+    build_where_clause,
+    parse_qualified_name,
+    validate_identifier,
+    validate_type,
+)
 from ..type_mapping import Column, SchemaMapper
 from . import watermark as wm
 from .inference import infer_columns
@@ -46,23 +54,56 @@ logger = logging.getLogger(__name__)
 # to reject unexpected keys from user-supplied config files before they reach the
 # DatabaseConfig constructor, preventing unknown kwargs from propagating to
 # database drivers.
-_CONFIG_FIELDS: frozenset[str] = frozenset(
-    f.name for f in dataclasses.fields(DatabaseConfig)
-)
+_CONFIG_FIELDS: frozenset[str] = frozenset(f.name for f in dataclasses.fields(DatabaseConfig))
 
 # Settings keys accepted by from_job_config.  Unknown keys are warned about so
 # typos in job files surface immediately rather than silently doing nothing.
-_ALLOWED_SETTINGS: frozenset[str] = frozenset({
-    "batch_size",
-    "progress_mode",
-    "dry_run",
-    "drop_extra_columns",
-    "verbose",
-    "retry_count",
-    "retry_delay_seconds",
-    "use_transaction",
-    "max_workers",
-})
+_ALLOWED_SETTINGS: frozenset[str] = frozenset(
+    {
+        "batch_size",
+        "progress_mode",
+        "dry_run",
+        "drop_extra_columns",
+        "verbose",
+        "retry_count",
+        "retry_delay_seconds",
+        "use_transaction",
+        "max_workers",
+    }
+)
+
+
+@dataclasses.dataclass
+class _TableSyncPlan:
+    """Everything _execute_table_sync needs, resolved up front.
+
+    Produced by _plan_table_sync, which performs reads only (source metadata,
+    row count, watermark file).  Splitting planning from execution keeps the
+    highest-risk function in the codebase auditable: every data mutation and
+    the transaction boundary live in _execute_table_sync alone.
+    """
+
+    name: str
+    mode: TransferMode
+    use_tx: bool
+    uid: str
+    source_name: QualifiedName
+    target_name: QualifiedName
+    rename_map: dict[str, str]
+    target_columns: list[Column]
+    column_names: list[str]
+    target_column_names: list[str]
+    target_primary_key: list[str]
+    pk_cols_for_sd: list[Column]
+    filter_sql: str
+    params: list[Any]
+    order_sql: str
+    batch_size: int
+    total: int | None
+    transform: Any
+    on_batch: Any
+    snapshot_ts: str | None
+    watermark_cfg: dict[str, Any] | None
 
 
 class SyncDB:
@@ -98,15 +139,13 @@ class SyncDB:
     ) -> None:
         if source_connector is not None:
             warnings.warn(
-                "source_connector is deprecated; pass a BaseConnector as the "
-                "positional source= argument instead.",
+                "source_connector is deprecated; pass a BaseConnector as the positional source= argument instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
         if target_connector is not None:
             warnings.warn(
-                "target_connector is deprecated; pass a BaseConnector as the "
-                "positional target= argument instead.",
+                "target_connector is deprecated; pass a BaseConnector as the positional target= argument instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -145,10 +184,7 @@ class SyncDB:
     def __repr__(self) -> str:
         src = self.source.config.engine if self.source else None
         tgt = self.target.config.engine if self.target else None
-        return (
-            f"SyncDB(source={src!r}, target={tgt!r}, "
-            f"batch_size={self.batch_size!r}, dry_run={self.dry_run!r})"
-        )
+        return f"SyncDB(source={src!r}, target={tgt!r}, batch_size={self.batch_size!r}, dry_run={self.dry_run!r})"
 
     def sync_tables(
         self,
@@ -178,9 +214,7 @@ class SyncDB:
             return self._sync_tables_parallel(specs, sync_id)
         return self._sync_tables_sequential(specs, sync_id)
 
-    def _sync_tables_sequential(
-        self, specs: dict[str, dict[str, Any]], sync_id: str
-    ) -> list[TableSyncResult]:
+    def _sync_tables_sequential(self, specs: dict[str, dict[str, Any]], sync_id: str) -> list[TableSyncResult]:
         # sync_tables() guarantees both are set before dispatching here.
         assert self.source is not None and self.target is not None
         results: list[TableSyncResult] = []
@@ -188,9 +222,7 @@ class SyncDB:
         _log.info("Starting sequential sync of %d table(s)", len(specs))
         self.source.connect()
         self.target.connect()
-        self.progress.label_width = max(
-            (len(spec.get("destination", "")) for spec in specs.values()), default=0
-        )
+        self.progress.label_width = max((len(spec.get("destination", "")) for spec in specs.values()), default=0)
         try:
             for name, spec in specs.items():
                 results.append(self._sync_one_table(name, spec, self.source, self.target, sync_id=sync_id))
@@ -201,9 +233,7 @@ class SyncDB:
         emit_summary(results, self.verbose, self.verbose_stream)
         return results
 
-    def _sync_tables_parallel(
-        self, specs: dict[str, dict[str, Any]], sync_id: str
-    ) -> list[TableSyncResult]:
+    def _sync_tables_parallel(self, specs: dict[str, dict[str, Any]], sync_id: str) -> list[TableSyncResult]:
         assert self.source is not None and self.target is not None
         if not hasattr(self.source, "config") or not hasattr(self.target, "config"):
             raise ValueError(
@@ -213,7 +243,8 @@ class SyncDB:
         _log = logging.LoggerAdapter(logger, {"sync_id": sync_id})
         _log.info(
             "Starting parallel sync of %d table(s) with %d workers",
-            len(specs), self.max_workers,
+            len(specs),
+            self.max_workers,
         )
         results: list[TableSyncResult | None] = [None] * len(specs)
         # abort is set by the first failing future so later queued workers exit early.
@@ -244,8 +275,7 @@ class SyncDB:
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
-                executor.submit(sync_in_thread, i, name, spec): name
-                for i, (name, spec) in enumerate(specs.items())
+                executor.submit(sync_in_thread, i, name, spec): name for i, (name, spec) in enumerate(specs.items())
             }
             for future in as_completed(futures):
                 try:
@@ -255,7 +285,8 @@ class SyncDB:
                     errors.append(exc)
                     _log.error(
                         "Table '%s' failed: %s",
-                        futures[future], exc,
+                        futures[future],
+                        exc,
                         exc_info=True,
                     )
                     abort.set()
@@ -269,8 +300,7 @@ class SyncDB:
             # from the audit trail just because a sibling failed.
             raise ParallelSyncError(
                 f"{len(errors)} table(s) failed during parallel sync "
-                f"({len(final)} completed): "
-                + "; ".join(f"{type(e).__name__}: {e}" for e in errors),
+                f"({len(final)} completed): " + "; ".join(f"{type(e).__name__}: {e}" for e in errors),
                 results=final,
                 errors=errors,
             ) from errors[0]
@@ -322,8 +352,7 @@ class SyncDB:
         unknown_settings = set(settings) - _ALLOWED_SETTINGS
         if unknown_settings:
             logger.warning(
-                "Unknown setting(s) in job config will be ignored: %s. "
-                "Valid settings: %s",
+                "Unknown setting(s) in job config will be ignored: %s. Valid settings: %s",
                 sorted(unknown_settings),
                 sorted(_ALLOWED_SETTINGS),
             )
@@ -414,12 +443,14 @@ class SyncDB:
     ) -> int:
         """Read a local file and insert it into a target table.
 
-        The target table is created automatically if it doesn't exist; column types
-        are inferred from the first row of the file via infer_columns().
+        The target table is created automatically if it doesn't exist; column
+        types are inferred from the first batch of rows via infer_columns().
         fresh_insert=True truncates an existing table before inserting.
 
-        Rows are inserted in chunks of self.batch_size (with the configured retry
-        policy) so a large file never lands in a single oversized statement.
+        Rows are streamed in batches of self.batch_size (with the configured
+        retry policy): CSV and Parquet files are never fully materialised in
+        memory; Excel and Pickle have no incremental reader and are loaded
+        once, then inserted in chunks.
 
         hmac_key enables HMAC integrity verification for pickle files — see
         FileTransfer.read().  Always pass it when importing pickle files you did
@@ -429,28 +460,42 @@ class SyncDB:
         """
         if self.target is None:
             raise ValueError("target connector/config is required for import")
-        rows = self.file_transfer.read(input_path, file_format, hmac_key=hmac_key, hmac_alg=hmac_alg)
+        batches = self.file_transfer.read_streaming(
+            input_path,
+            file_format,
+            batch_size=self.batch_size,
+            hmac_key=hmac_key,
+            hmac_alg=hmac_alg,
+        )
+        first_batch = next(iter(batches), None)
         target_name = parse_qualified_name(destination, self.target.config.default_schema)
         self.target.connect()
         try:
             if not self.target.table_exists(target_name.schema, target_name.table):
+                if first_batch is None:
+                    # Match infer_columns' empty-input contract without creating
+                    # an empty table of unknowable shape.
+                    raise ValueError("Cannot infer a target table from an empty file")
                 self.target.create_schema(target_name.schema)
                 self.target.create_table(
-                    target_name.schema, target_name.table,
-                    infer_columns(rows, self.target.engine, self.schema_mapper),
+                    target_name.schema,
+                    target_name.table,
+                    infer_columns(first_batch, self.target.engine, self.schema_mapper),
                 )
             elif fresh_insert:
                 self.target.truncate_table(target_name.schema, target_name.table)
-            if not rows:
+            if first_batch is None:
                 return 0
-            columns = list(rows[0].keys())
+            columns = list(first_batch[0].keys())
             total = 0
-            for start in range(0, len(rows), self.batch_size):
-                chunk = rows[start:start + self.batch_size]
+            for chunk in itertools.chain([first_batch], batches):
                 total += self._retry(
                     partial(
                         self.target.insert_batch,
-                        target_name.schema, target_name.table, chunk, columns,
+                        target_name.schema,
+                        target_name.table,
+                        chunk,
+                        columns,
                     ),
                     on_retry=self.target.reconnect,
                 )
@@ -470,6 +515,11 @@ class SyncDB:
     ) -> TableSyncResult:
         """Synchronize a single table spec and return audited runtime details.
 
+        Structured as plan → execute → finalize: _plan_table_sync resolves
+        everything up front with reads only, _execute_table_sync owns all data
+        mutations and the transaction boundary, and this method handles spec
+        validation, schema alignment, dry-run short-circuit, and timing.
+
         abort, when supplied (parallel mode), is checked at the top of each batch
         so a worker stops promptly after a sibling table fails instead of running
         to completion — ThreadPoolExecutor cannot interrupt an in-flight future.
@@ -481,22 +531,56 @@ class SyncDB:
             raise ValueError(f"Table spec '{name}' must include source and destination")
         _log.info(
             "Syncing '%s': %s → %s (mode=%s)",
-            name, spec["source"], spec["destination"], spec.get("mode", "append"),
+            name,
+            spec["source"],
+            spec["destination"],
+            spec.get("mode", "append"),
         )
         reporter = progress or self.progress
-        use_tx = self.use_transaction or bool(spec.get("use_transaction", False))
 
-        mode = TransferMode(spec.get("mode", TransferMode.APPEND.value))
-        source_name = parse_qualified_name(spec["source"], source.config.default_schema)
-        target_name = parse_qualified_name(spec["destination"], target.config.default_schema)
-        rename_map = self._normalize_rename_map(spec.get("rename"))
+        plan = self._plan_table_sync(name, spec, source, target)
         result = TableSyncResult(
             name=name,
             source=spec["source"],
             destination=spec["destination"],
-            mode=mode.value,
+            mode=plan.mode.value,
             dry_run=self.dry_run,
         )
+        self._sync_schema(plan.target_name.schema, plan.target_name.table, plan.target_columns, result, target)
+
+        if self.dry_run:
+            return result
+
+        self._execute_table_sync(plan, result, spec, source, target, reporter, abort)
+
+        result.duration_seconds = time.monotonic() - _t0
+        _log.info(
+            "Finished '%s': %d rows written in %d batches (%.2fs)",
+            name,
+            result.rows_written,
+            result.batches,
+            result.duration_seconds,
+        )
+        return result
+
+    def _plan_table_sync(
+        self,
+        name: str,
+        spec: dict[str, Any],
+        source: BaseConnector,
+        target: BaseConnector,
+    ) -> _TableSyncPlan:
+        """Resolve names, columns, filters, keys, and batch sizing for one table.
+
+        Reads only: source metadata, an optional row count, and the watermark
+        file.  No tables are created or written here, so a dry run can stop
+        after this plus schema alignment.
+        """
+        mode = TransferMode(spec.get("mode", TransferMode.APPEND.value))
+        use_tx = self.use_transaction or bool(spec.get("use_transaction", False))
+        source_name = parse_qualified_name(spec["source"], source.config.default_schema)
+        target_name = parse_qualified_name(spec["destination"], target.config.default_schema)
+        rename_map = self._normalize_rename_map(spec.get("rename"))
 
         source_columns = source.get_columns(source_name.schema, source_name.table)
         target_columns = self.schema_mapper.map_columns(source_columns, source.engine, target.engine)
@@ -516,40 +600,24 @@ class SyncDB:
                     RuntimeWarning,
                     stacklevel=2,
                 )
-        self._sync_schema(target_name.schema, target_name.table, target_columns, result, target)
 
-        if self.dry_run:
-            return result
-
-        # Per-call uid prevents concurrent syncs of the same table from colliding
-        # on deterministic temp table names (staging, seen-keys).
-        uid = uuid.uuid4().hex[:8]
-
-        # For SOFT_DELETE, pre-create the seen-keys accumulation table so PKs can
-        # be streamed directly to the database during the batch loop instead of
-        # building an unbounded Python set that would OOM on large tables.
-        seen_keys_table: str | None = None
+        source_primary_key = list(spec.get("primary_key") or [col.name for col in source_columns if col.is_primary_key])
+        target_primary_key = [rename_map.get(col, col) for col in source_primary_key]
         pk_cols_for_sd: list[Column] = []
-        if mode == TransferMode.SOFT_DELETE:
-            source_primary_key_pre = list(
-                spec.get("primary_key") or [col.name for col in source_columns if col.is_primary_key]
-            )
-            target_primary_key_pre = [rename_map.get(col, col) for col in source_primary_key_pre]
-            if target_primary_key_pre:
-                pk_col_map_pre = {col.name: col for col in target_columns}
-                pk_cols_for_sd = [pk_col_map_pre[pk] for pk in target_primary_key_pre if pk in pk_col_map_pre]
-                if pk_cols_for_sd:
-                    seen_keys_table = target.init_seen_keys_table(
-                        target_name.schema, target_name.table, pk_cols_for_sd, uid
-                    )
+        if mode == TransferMode.SOFT_DELETE and target_primary_key:
+            pk_col_map = {col.name: col for col in target_columns}
+            pk_cols_for_sd = [pk_col_map[pk] for pk in target_primary_key if pk in pk_col_map]
 
         filter_sql, params = build_where_clause(spec.get("filter"))
-        watermark_cfg = wm.load_watermark(spec)
+        watermark_cfg = wm.load_watermark(spec, target)
         if watermark_cfg:
             filter_sql, params = wm.apply_watermark_filter(
-                filter_sql, params,
-                watermark_cfg["column"], watermark_cfg["value"],
-                source.quote_char, source.placeholder,
+                filter_sql,
+                params,
+                watermark_cfg["column"],
+                watermark_cfg["value"],
+                source.quote_char,
+                source.placeholder,
                 comparison=watermark_cfg["comparison"],
             )
         order_sql = build_order_by(spec.get("order_by"), source.quote_char)
@@ -559,138 +627,213 @@ class SyncDB:
         else:
             total = None
 
-        batch_size = self._resolve_batch_size(total, spec.get("batch_size"))
-        column_names = [column.name for column in source_columns]
-        target_column_names = [column.name for column in target_columns]
-        source_primary_key = list(
-            spec.get("primary_key") or [col.name for col in source_columns if col.is_primary_key]
+        return _TableSyncPlan(
+            name=name,
+            mode=mode,
+            use_tx=use_tx,
+            # Per-call uid prevents concurrent syncs of the same table from
+            # colliding on deterministic temp table names (staging, seen-keys).
+            uid=uuid.uuid4().hex[:8],
+            source_name=source_name,
+            target_name=target_name,
+            rename_map=rename_map,
+            target_columns=target_columns,
+            column_names=[column.name for column in source_columns],
+            target_column_names=[column.name for column in target_columns],
+            target_primary_key=target_primary_key,
+            pk_cols_for_sd=pk_cols_for_sd,
+            filter_sql=filter_sql,
+            params=params,
+            order_sql=order_sql,
+            batch_size=self._resolve_batch_size(total, spec.get("batch_size")),
+            total=total,
+            transform=spec.get("transform"),
+            on_batch=spec.get("on_batch"),
+            snapshot_ts=datetime.now(timezone.utc).isoformat() if mode == TransferMode.SNAPSHOT else None,
+            watermark_cfg=watermark_cfg,
         )
-        target_primary_key = [rename_map.get(col, col) for col in source_primary_key]
-        transform = spec.get("transform")
-        on_batch = spec.get("on_batch")
-        snapshot_ts = datetime.now(timezone.utc).isoformat() if mode == TransferMode.SNAPSHOT else None
 
-        # begin() must run BEFORE _prepare_write_target so FULL_REFRESH's TRUNCATE
-        # (and APPEND_STAGING's staging DDL) participate in the transaction — a
-        # truncate that auto-commits ahead of begin() would leave the target
-        # permanently empty if the sync then failed, defeating use_transaction.
-        if use_tx:
+    def _execute_table_sync(
+        self,
+        plan: _TableSyncPlan,
+        result: TableSyncResult,
+        spec: dict[str, Any],
+        source: BaseConnector,
+        target: BaseConnector,
+        reporter: ProgressReporter,
+        abort: threading.Event | None,
+    ) -> None:
+        """Run every data mutation for a planned table sync.
+
+        Ordering is the correctness story here:
+          1. begin() precedes _prepare_write_target so FULL_REFRESH's TRUNCATE
+             (and APPEND_STAGING's staging DDL) participate in the transaction —
+             a truncate that auto-commits ahead of begin() would leave the
+             target permanently empty if the sync then failed.
+          2. Staging swap and soft-delete run BEFORE commit — they are the same
+             logical unit of work as the batch writes.
+          3. The quality gate runs BEFORE commit so a failed check rolls the
+             write back (when use_tx) instead of certifying bad data.
+          4. The watermark is saved only AFTER a durable commit: saving earlier
+             could skip rows on a commit failure (at-most-once / data loss);
+             saving after means at-worst re-processing (at-least-once).
+        """
+        # Pre-create the seen-keys accumulation table so SOFT_DELETE PKs can be
+        # streamed to the database during the batch loop instead of building an
+        # unbounded Python set that would OOM on large tables.
+        seen_keys_table: str | None = None
+        if plan.mode == TransferMode.SOFT_DELETE and plan.pk_cols_for_sd:
+            seen_keys_table = target.init_seen_keys_table(
+                plan.target_name.schema, plan.target_name.table, plan.pk_cols_for_sd, plan.uid
+            )
+
+        if plan.use_tx:
             target.begin()
         reporter.start()
         staging_table: str | None = None
         try:
             write_schema, write_table, staging_table = self._prepare_write_target(
-                mode, target, target_name, target_columns, uid
+                plan.mode, target, plan.target_name, plan.target_columns, plan.uid
             )
 
-            for raw_batch in source.fetch_batches(
-                source_name.schema, source_name.table,
-                columns=column_names,
-                where=filter_sql,
-                params=params,
-                order_by=order_sql,
-                batch_size=batch_size,
-            ):
-                if abort is not None and abort.is_set():
-                    raise RuntimeError(f"Sync of '{name}' aborted due to a sibling table failure")
-                if watermark_cfg:
-                    result.watermark_value = wm.max_watermark_value(
-                        result.watermark_value, raw_batch, watermark_cfg["column"]
-                    )
-                batch = self._prepare_batch(
-                    raw_batch, rename_map, transform, target_column_names, mode, snapshot_ts
-                )
-                if not batch:
-                    continue
+            self._copy_batches(
+                plan,
+                result,
+                source,
+                target,
+                reporter,
+                abort,
+                write_schema,
+                write_table,
+                seen_keys_table,
+            )
 
-                # partial binds this iteration's values into a zero-arg callable for
-                # _retry, without a closure over loop variables (which would be a
-                # late-binding hazard and trip linters).
-                written: int = self._retry(
-                    partial(
-                        self._write_batch, target, mode, write_schema, write_table,
-                        batch, target_column_names, target_primary_key,
-                    ),
-                    on_retry=target.reconnect,
-                )
-
-                # Stream source PKs directly into the seen-keys table to avoid
-                # accumulating an unbounded Python set for SOFT_DELETE mode.
-                if seen_keys_table and target_primary_key:
-                    pk_rows = [
-                        {pk: row.get(pk) for pk in target_primary_key}
-                        for row in batch
-                    ]
-                    if pk_rows:
-                        self._retry(
-                            partial(
-                                target.insert_batch,
-                                target_name.schema, seen_keys_table, pk_rows, target_primary_key,
-                            ),
-                            on_retry=target.reconnect,
-                        )
-
-                result.batches += 1
-                result.rows_read += len(raw_batch)
-                result.rows_written += written
-                reporter.update(result.destination, result.rows_written, total)
-                if on_batch:
-                    on_batch(result)
-
-            # Staging swap and soft-delete are part of the same logical unit of
-            # work as the batch writes, so they run BEFORE commit — a crash here
-            # rolls back everything (where the engine supports DDL rollback) and
-            # the next run re-processes cleanly under the at-least-once guarantee.
             if staging_table:
                 replace_from_staging(
-                    target, target_name.schema, target_name.table,
-                    staging_table, target_column_names,
+                    target,
+                    plan.target_name.schema,
+                    plan.target_name.table,
+                    staging_table,
+                    plan.target_column_names,
                     lambda op: self._retry(op, on_retry=target.reconnect),
                 )
 
-            if seen_keys_table and pk_cols_for_sd:
+            if seen_keys_table and plan.pk_cols_for_sd:
                 deleted_at = datetime.now(timezone.utc).isoformat()
                 result.rows_soft_deleted = target.apply_soft_deletes_from_keys_table(
-                    target_name.schema, target_name.table,
-                    seen_keys_table, pk_cols_for_sd, deleted_at,
+                    plan.target_name.schema,
+                    plan.target_name.table,
+                    seen_keys_table,
+                    plan.pk_cols_for_sd,
+                    deleted_at,
                 )
 
-            # Validate expectations BEFORE committing and saving the watermark so
-            # that a failed quality check rolls back the write (when use_tx) and
-            # does not advance the cursor — the next run re-processes and re-checks.
             validate_expectations(
-                target, target_name.schema, target_name.table, spec.get("expect"), result, self.batch_size
+                target,
+                plan.target_name.schema,
+                plan.target_name.table,
+                spec.get("expect"),
+                result,
+                self.batch_size,
             )
 
-            # Commit only after every mutation and the quality gate have succeeded.
-            if use_tx:
+            if plan.use_tx:
                 target.commit()
 
-            # Persist the watermark only after a durable commit.  Saving it before
-            # the commit could skip rows on a commit failure (at-most-once / data
-            # loss); saving after means at-worst re-processing (at-least-once).
-            if watermark_cfg and result.watermark_value is not None:
-                wm.save_watermark(watermark_cfg, result.watermark_value)
+            if plan.watermark_cfg and result.watermark_value is not None:
+                wm.save_watermark(plan.watermark_cfg, result.watermark_value, target)
 
         except Exception:
-            if use_tx:
+            if plan.use_tx:
                 with contextlib.suppress(Exception):
                     target.rollback()
             raise
         finally:
             if staging_table:
                 with contextlib.suppress(Exception):
-                    target.drop_table(target_name.schema, staging_table)
+                    target.drop_table(plan.target_name.schema, staging_table)
             if seen_keys_table:
                 with contextlib.suppress(Exception):
-                    target.drop_table(target_name.schema, seen_keys_table)
+                    target.drop_table(plan.target_name.schema, seen_keys_table)
 
-        result.duration_seconds = time.monotonic() - _t0
-        _log.info(
-            "Finished '%s': %d rows written in %d batches (%.2fs)",
-            name, result.rows_written, result.batches, result.duration_seconds,
-        )
-        return result
+    def _copy_batches(
+        self,
+        plan: _TableSyncPlan,
+        result: TableSyncResult,
+        source: BaseConnector,
+        target: BaseConnector,
+        reporter: ProgressReporter,
+        abort: threading.Event | None,
+        write_schema: str | None,
+        write_table: str,
+        seen_keys_table: str | None,
+    ) -> None:
+        """The batch loop: fetch → prepare → write, with retries and progress."""
+        for raw_batch in source.fetch_batches(
+            plan.source_name.schema,
+            plan.source_name.table,
+            columns=plan.column_names,
+            where=plan.filter_sql,
+            params=plan.params,
+            order_by=plan.order_sql,
+            batch_size=plan.batch_size,
+        ):
+            if abort is not None and abort.is_set():
+                raise RuntimeError(f"Sync of '{plan.name}' aborted due to a sibling table failure")
+            if plan.watermark_cfg:
+                result.watermark_value = wm.max_watermark_value(
+                    result.watermark_value, raw_batch, plan.watermark_cfg["column"]
+                )
+            batch = self._prepare_batch(
+                raw_batch,
+                plan.rename_map,
+                plan.transform,
+                plan.target_column_names,
+                plan.mode,
+                plan.snapshot_ts,
+            )
+            if not batch:
+                continue
+
+            # partial binds this iteration's values into a zero-arg callable for
+            # _retry, without a closure over loop variables (which would be a
+            # late-binding hazard and trip linters).
+            written: int = self._retry(
+                partial(
+                    self._write_batch,
+                    target,
+                    plan.mode,
+                    write_schema,
+                    write_table,
+                    batch,
+                    plan.target_column_names,
+                    plan.target_primary_key,
+                ),
+                on_retry=target.reconnect,
+            )
+
+            # Stream source PKs directly into the seen-keys table to avoid
+            # accumulating an unbounded Python set for SOFT_DELETE mode.
+            if seen_keys_table and plan.target_primary_key:
+                pk_rows = [{pk: row.get(pk) for pk in plan.target_primary_key} for row in batch]
+                if pk_rows:
+                    self._retry(
+                        partial(
+                            target.insert_batch,
+                            plan.target_name.schema,
+                            seen_keys_table,
+                            pk_rows,
+                            plan.target_primary_key,
+                        ),
+                        on_retry=target.reconnect,
+                    )
+
+            result.batches += 1
+            result.rows_read += len(raw_batch)
+            result.rows_written += written
+            reporter.update(result.destination, result.rows_written, plan.total)
+            if plan.on_batch:
+                plan.on_batch(result)
 
     @staticmethod
     def _write_batch(
@@ -754,9 +897,7 @@ class SyncDB:
         write_schema = target_name.schema
         write_table = target_name.table
         if mode == TransferMode.APPEND_STAGING:
-            staging_table = create_staging_table(
-                target, target_name.schema, target_name.table, target_columns, uid=uid
-            )
+            staging_table = create_staging_table(target, target_name.schema, target_name.table, target_columns, uid=uid)
             write_table = staging_table
         elif mode == TransferMode.FULL_REFRESH:
             target.truncate_table(target_name.schema, target_name.table)
@@ -922,6 +1063,4 @@ class SyncDB:
             return None
         if value in {"standard", "detailed"}:
             return value
-        raise ValueError(
-            f"verbose must be one of: None, 'standard', 'detailed'; got {verbose!r}"
-        )
+        raise ValueError(f"verbose must be one of: None, 'standard', 'detailed'; got {verbose!r}")

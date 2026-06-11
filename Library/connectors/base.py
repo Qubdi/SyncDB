@@ -251,10 +251,7 @@ class BaseConnector(ABC):
         into Python memory at once — provided _batch_cursor() returns a cursor
         that does not buffer client-side (see its docstring).
         """
-        names = (
-            ", ".join(quote_identifier(col, self.quote_char) for col in columns)
-            if columns else "*"
-        )
+        names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
         query = f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}"
         return self._stream_query(query, params, batch_size)
 
@@ -344,15 +341,11 @@ class BaseConnector(ABC):
         # INFORMATION_SCHEMA column names are lowercase on PostgreSQL/MySQL but
         # uppercase on MSSQL; handle both.  Filter out any None values that would
         # result from a driver returning an unexpected column name casing.
-        return [
-            name for name in (
-                row.get("table_name") or row.get("TABLE_NAME")
-                for row in rows
-            )
-            if name is not None
-        ]
+        return [name for name in (row.get("table_name") or row.get("TABLE_NAME") for row in rows) if name is not None]
 
-    def get_row_count(self, schema: str | None, table: str, where: str = "", params: Sequence[Any] | None = None) -> int:
+    def get_row_count(
+        self, schema: str | None, table: str, where: str = "", params: Sequence[Any] | None = None
+    ) -> int:
         """Return SELECT COUNT(*) for the table, optionally filtered by a WHERE clause."""
         name = self.quote_table(schema, table)
         row = self.execute_query(f"SELECT COUNT(*) AS row_count FROM {name}{where}", params or [])[0]
@@ -402,9 +395,7 @@ class BaseConnector(ABC):
         """
         if not rows or not primary_key:
             return 0
-        if len(rows) > self._DELETE_KEYS_TABLE_THRESHOLD and (
-            self.ddl_transactional or not self._in_transaction
-        ):
+        if len(rows) > self._DELETE_KEYS_TABLE_THRESHOLD and (self.ddl_transactional or not self._in_transaction):
             return self._delete_matching_rows_via_keys_table(schema, table, rows, primary_key)
         # Maximum parameters per DELETE statement; keeps each statement well
         # under pyodbc's ~2100 limit and produces manageable query plans.
@@ -412,15 +403,14 @@ class BaseConnector(ABC):
         sub_size = max(1, max_params // len(primary_key))
         total = 0
         for start in range(0, len(rows), sub_size):
-            chunk = rows[start:start + sub_size]
+            chunk = rows[start : start + sub_size]
             predicates = []
             params: list[Any] = []
             for row in chunk:
                 predicates.append(
                     "("
                     + " AND ".join(
-                        f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
-                        for column in primary_key
+                        f"{quote_identifier(column, self.quote_char)} = {self.placeholder}" for column in primary_key
                     )
                     + ")"
                 )
@@ -444,12 +434,10 @@ class BaseConnector(ABC):
         and the temp table is dropped in a finally block.
         """
         import uuid as _uuid
+
         uid = _uuid.uuid4().hex[:8]
         column_types = {col.name: col for col in self.get_columns(schema, table)}
-        pk_columns = [
-            column_types.get(pk) or Column(name=pk, data_type="text", nullable=True)
-            for pk in primary_key
-        ]
+        pk_columns = [column_types.get(pk) or Column(name=pk, data_type="text", nullable=True) for pk in primary_key]
         keys_table = self.init_seen_keys_table(schema, table, pk_columns, uid)
         try:
             key_rows = [{pk: row[pk] for pk in primary_key} for row in rows]
@@ -462,9 +450,7 @@ class BaseConnector(ABC):
                 for pk in primary_key
             )
             return self.execute_update(
-                f"DELETE FROM {target_ref} WHERE EXISTS ("
-                f"SELECT 1 FROM {keys_ref} WHERE {join_conds}"
-                f")"
+                f"DELETE FROM {target_ref} WHERE EXISTS (SELECT 1 FROM {keys_ref} WHERE {join_conds})"
             )
         finally:
             with contextlib.suppress(Exception):
@@ -488,8 +474,7 @@ class BaseConnector(ABC):
         if not rows or not primary_key or not values:
             return 0
         assignments = ", ".join(
-            f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
-            for column in values
+            f"{quote_identifier(column, self.quote_char)} = {self.placeholder}" for column in values
         )
         set_values = list(values.values())
         # Keep each statement well under the ~2100 param ceiling: reserve the SET
@@ -498,15 +483,14 @@ class BaseConnector(ABC):
         sub_size = max(1, max_params // len(primary_key))
         total = 0
         for start in range(0, len(rows), sub_size):
-            chunk = rows[start:start + sub_size]
+            chunk = rows[start : start + sub_size]
             predicates = []
             params: list[Any] = list(set_values)
             for row in chunk:
                 predicates.append(
                     "("
                     + " AND ".join(
-                        f"{quote_identifier(column, self.quote_char)} = {self.placeholder}"
-                        for column in primary_key
+                        f"{quote_identifier(column, self.quote_char)} = {self.placeholder}" for column in primary_key
                     )
                     + ")"
                 )
@@ -556,8 +540,7 @@ class BaseConnector(ABC):
         target_ref = self.quote_table(schema, table)
         keys_ref = self.quote_table(schema, keys_table)
         join_conds = " AND ".join(
-            f"{target_ref}.{quote_identifier(pk, self.quote_char)} = "
-            f"{keys_ref}.{quote_identifier(pk, self.quote_char)}"
+            f"{target_ref}.{quote_identifier(pk, self.quote_char)} = {keys_ref}.{quote_identifier(pk, self.quote_char)}"
             for pk in primary_key
         )
         deleted_col = quote_identifier("deleted_at", self.quote_char)
@@ -601,6 +584,7 @@ class BaseConnector(ABC):
             stacklevel=2,
         )
         import uuid as _uuid
+
         uid = _uuid.uuid4().hex[:8]
         primary_key = [col.name for col in pk_columns]
         key_rows = [dict(zip(primary_key, key, strict=False)) for key in seen_keys]
@@ -610,12 +594,10 @@ class BaseConnector(ABC):
             self.drop_table(schema, keys_table)
             self.create_table(schema, keys_table, key_col_defs)
             for i in range(0, max(1, len(key_rows)), batch_size):
-                chunk = key_rows[i:i + batch_size]
+                chunk = key_rows[i : i + batch_size]
                 if chunk:
                     self.insert_batch(schema, keys_table, chunk, primary_key)
-            return self.apply_soft_deletes_from_keys_table(
-                schema, table, keys_table, pk_columns, deleted_at_value
-            )
+            return self.apply_soft_deletes_from_keys_table(schema, table, keys_table, pk_columns, deleted_at_value)
         finally:
             with contextlib.suppress(Exception):
                 self.drop_table(schema, keys_table)

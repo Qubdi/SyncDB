@@ -40,8 +40,8 @@ class MSSQLConnector(BaseConnector):
         ODBC attributes into the connection string.
         """
         s = str(value)
-        if any(c in s for c in ('{', '}', ';', '=')):
-            return '{' + s.replace('}', '}}') + '}'
+        if any(c in s for c in ("{", "}", ";", "=")):
+            return "{" + s.replace("}", "}}") + "}"
         return s
 
     def connect(self) -> None:
@@ -162,7 +162,7 @@ class MSSQLConnector(BaseConnector):
         sub_size = max(1, 2000 // len(columns))
         total = 0
         for i in range(0, len(records), sub_size):
-            chunk = records[i:i + sub_size]
+            chunk = records[i : i + sub_size]
             row_placeholders = ", ".join(["?"] * len(columns))
             values_rows = ", ".join(f"({row_placeholders})" for _ in chunk)
             merge_sql = (
@@ -240,10 +240,7 @@ class MSSQLConnector(BaseConnector):
         # validate_identifier ensures it contains only safe identifier characters,
         # giving two independent layers of injection prevention.
         quoted = f"[{schema}]"
-        self.execute_query(
-            f"IF SCHEMA_ID(N'{schema}') IS NULL "
-            f"EXEC sp_executesql N'CREATE SCHEMA {quoted}'"
-        )
+        self.execute_query(f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC sp_executesql N'CREATE SCHEMA {quoted}'")
 
     def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
         definitions = [self._column_definition(column) for column in columns]
@@ -256,7 +253,9 @@ class MSSQLConnector(BaseConnector):
         self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD {self._column_definition(column)}")
 
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}")
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
+        )
 
     def truncate_table(self, schema: str | None, table: str) -> None:
         self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")

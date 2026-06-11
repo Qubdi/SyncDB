@@ -64,6 +64,7 @@ class TableSyncResult:
     Returned by SyncDB.sync_tables so callers can audit what happened without
     parsing log output.  dry_run=True means no data or DDL was actually applied.
     """
+
     name: str
     source: str
     destination: str

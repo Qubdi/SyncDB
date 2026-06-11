@@ -1,9 +1,9 @@
-# Minimum compatible versions for full SyncDB functionality.
-# The package core imports without these; install this file when using DB connectors
-# and Excel/Parquet file support.
-pyodbc>=5.0
-psycopg2-binary>=2.9
-mysql-connector-python>=9.0
-pandas>=2.0
-pyarrow>=14.0
-openpyxl>=3.1
+# Thin pointer — the single source of truth for dependencies is pyproject.toml.
+#
+#   pip install -r requirements.txt        (this file: local package + all extras)
+#   pip install "Qubdi-SyncDB[all]"        (from PyPI: drivers + file formats)
+#   pip install -e ".[dev]"                (development: editable + test/lint tools)
+#
+# requirements-dev.txt is the pinned lockfile generated from pyproject's dev
+# extra via pip-compile; regenerate it there rather than editing pins here.
+.[all]

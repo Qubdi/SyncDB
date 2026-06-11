@@ -49,9 +49,11 @@ What the library enforces:
 ## Dependency auditing
 
 The library has no required runtime dependencies; drivers are optional extras.
-Audit your installed environment with:
+`pip-audit` ships with the dev extra and is wired into pre-commit's manual
+stage — run it before every release:
 
 ```bash
-pip install pip-audit
+pre-commit run pip-audit --hook-stage manual
+# or directly:
 pip-audit
 ```

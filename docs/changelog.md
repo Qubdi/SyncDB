@@ -47,6 +47,24 @@
 
 ### New
 
+- **Watermark store is now safe for concurrent writers.**  save_watermark()
+  serialises its read-modify-write with an exclusive OS-level lock on a
+  ``.lock`` sidecar (msvcrt on Windows, flock elsewhere) plus an in-process
+  mutex, so overlapping cron runs or replicas sharing a volume cannot lose
+  each other's updates.  Replicas with independent disks still need distinct
+  store paths.
+- **Database-backed watermark storage.**  `"watermark_storage": "database"`
+  keeps incremental state in a `__syncdb_watermarks` table on the target
+  (created automatically, written with the engine's native atomic upsert)
+  instead of a local JSON file — the correct choice for multi-replica
+  deployments with independent disks, and the cursor travels with the target
+  data on restore.
+- **Streaming file imports.**  `import_file_to_table` now consumes
+  `FileTransfer.read_streaming()`: CSV, Parquet, and Excel files are read and
+  inserted batch by batch and are never fully materialised in memory (CSV
+  natively, Parquet via pyarrow `iter_batches`, Excel via openpyxl read-only
+  mode; Pickle has no incremental reader and is loaded once, then inserted in
+  chunks).
 - `"watermark_comparison": ">="` table-spec option for incremental syncs.  The
   default strict `>` skips rows committed late with a timestamp equal to the
   saved watermark; `>=` re-reads boundary rows each run (pair with `upsert`, or
@@ -60,6 +78,26 @@
 - Connector class attributes `timestamp_type` and `ddl_transactional` describe
   engine traits that previously leaked into the orchestration layer.
 - `SECURITY.md` documenting the threat model and reporting process.
+- `.pre-commit-config.yaml` mirroring the manual quality gates (ruff, mypy,
+  component tests on push, pip-audit on the manual stage); `pip-audit` and
+  `pre-commit` added to the dev extras; `requirements.txt` is now a thin
+  pointer to the pyproject extras (single source of truth;
+  `requirements-dev.txt` remains the pip-compile lockfile).
+- `publish.py` always runs the test/lint/type gate before a release — the
+  silent `--no-test` flag is gone (an env-var escape hatch exists for
+  emergencies and prints an unmissable warning); `--yes`/`--push` enable
+  non-interactive automation.
+
+### Internal
+
+- `_sync_one_table` was split into plan → execute → finalize
+  (`_TableSyncPlan`, `_plan_table_sync`, `_execute_table_sync`,
+  `_copy_batches`) so the transaction-ordering rules live in one auditable
+  place.  No behavior change.
+- The coverage gate (`fail_under = 90`) is now actually measured: the
+  component suite covers 93% of `Library/`.
+- Reformatted `Library/` with `ruff format` (the project's stated formatter,
+  previously never run).
 
 ---
 

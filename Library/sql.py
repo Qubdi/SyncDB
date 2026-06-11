@@ -38,9 +38,9 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # This blocks injection via type strings (";", ")", quotes, comments) while still
 # accepting every type this library emits or a caller would reasonably override to.
 _TYPE_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9_ ]*"      # base type name
-    r"(\([A-Za-z0-9_, ]+\))?"        # optional (n), (p,s), or (max)
-    r"(\s*\[\s*\])?$"                # optional array suffix
+    r"^[A-Za-z][A-Za-z0-9_ ]*"  # base type name
+    r"(\([A-Za-z0-9_, ]+\))?"  # optional (n), (p,s), or (max)
+    r"(\s*\[\s*\])?$"  # optional array suffix
 )
 
 # Deny-list machinery for raw WHERE clause strings.
@@ -61,22 +61,22 @@ _TYPE_RE = re.compile(
 # Never add a flag to skip this check; extend the deny-list instead if a
 # legitimate token is being incorrectly blocked.
 _WHERE_COMMENT_TOKENS = (
-    ";",     # statement terminator — stacked queries
-    "--",    # inline comment
-    "/*",    # block comment open
-    "*/",    # block comment close
+    ";",  # statement terminator — stacked queries
+    "--",  # inline comment
+    "/*",  # block comment open
+    "*/",  # block comment close
 )
 _WHERE_KEYWORD_RE = re.compile(
     r"\b(?:"
-    r"select|insert|update|delete|merge"        # DML / subquery injection
-    r"|drop|alter|create|truncate"              # DDL injection
-    r"|grant|revoke"                            # permission changes
-    r"|union"                                   # UNION-based exfiltration
-    r"|exec|execute|declare"                    # procedure calls / T-SQL variables
-    r"|waitfor|shutdown"                        # MSSQL time-based / DoS
-    r"|sleep|benchmark|pg_sleep"                # time-based blind injection
-    r"|load_file|outfile|dumpfile"              # MySQL file read/write
-    r"|xp_\w+|sp_\w+"                           # MSSQL extended/system procedures
+    r"select|insert|update|delete|merge"  # DML / subquery injection
+    r"|drop|alter|create|truncate"  # DDL injection
+    r"|grant|revoke"  # permission changes
+    r"|union"  # UNION-based exfiltration
+    r"|exec|execute|declare"  # procedure calls / T-SQL variables
+    r"|waitfor|shutdown"  # MSSQL time-based / DoS
+    r"|sleep|benchmark|pg_sleep"  # time-based blind injection
+    r"|load_file|outfile|dumpfile"  # MySQL file read/write
+    r"|xp_\w+|sp_\w+"  # MSSQL extended/system procedures
     r")\b"
 )
 # Hex literals (0x41...) are an evasion vector outside of quoted strings.
@@ -88,6 +88,7 @@ _STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 @dataclass(frozen=True)
 class QualifiedName:
     """A schema-qualified table reference.  schema may be None for unqualified names."""
+
     schema: str | None
     table: str
 

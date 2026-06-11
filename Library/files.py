@@ -124,6 +124,99 @@ class FileTransfer:
             return self._write_with_pandas(records, file_path, fmt)
         raise ValueError(f"Unsupported output format: {fmt}")
 
+    def read_streaming(
+        self,
+        path: str | Path,
+        file_format: FileFormat | str | None = None,
+        batch_size: int = 5000,
+        hmac_key: bytes | str | None = None,
+        hmac_alg: str = "sha256",
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Yield file rows in batches without materialising the whole file.
+
+        CSV streams natively; Parquet streams row groups via pyarrow; Excel
+        streams rows via openpyxl's read-only mode (each falls back to pandas
+        materialisation when the streaming library is unavailable).  Pickle has
+        no incremental reader API — it is fully loaded and then chunked, so
+        memory is bounded for every format except Pickle.
+
+        hmac_key/hmac_alg apply to Pickle files exactly as in read().
+        """
+        file_path = Path(path)
+        fmt = self._resolve_format(file_path, file_format)
+        if fmt == FileFormat.CSV:
+            return self._read_csv_streaming(file_path, batch_size)
+        if fmt == FileFormat.PARQUET:
+            return self._read_parquet_streaming(file_path, batch_size)
+        if fmt == FileFormat.EXCEL:
+            return self._read_excel_streaming(file_path, batch_size)
+        rows = self.read(file_path, fmt, hmac_key=hmac_key, hmac_alg=hmac_alg)
+        return self._chunk_rows(rows, batch_size)
+
+    def _read_csv_streaming(self, path: Path, batch_size: int) -> Iterator[list[dict[str, Any]]]:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            batch: list[dict[str, Any]] = []
+            for row in csv.DictReader(handle):
+                batch.append(dict(row))
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+    def _read_parquet_streaming(self, path: Path, batch_size: int) -> Iterator[list[dict[str, Any]]]:
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            # pandas can read parquet through other engines (fastparquet);
+            # fall back to materialise-then-chunk rather than failing outright.
+            yield from self._chunk_rows(self._read_with_pandas(path, FileFormat.PARQUET), batch_size)
+            return
+        parquet_file = pq.ParquetFile(str(path))  # type: ignore[no-untyped-call]
+        for record_batch in parquet_file.iter_batches(batch_size=batch_size):  # type: ignore[no-untyped-call]
+            rows: list[dict[str, Any]] = record_batch.to_pylist()
+            if rows:
+                yield rows
+
+    def _read_excel_streaming(self, path: Path, batch_size: int) -> Iterator[list[dict[str, Any]]]:
+        try:
+            import openpyxl
+        except ImportError:
+            # pandas may have another Excel engine available (xlrd for .xls);
+            # fall back to materialise-then-chunk rather than failing outright.
+            yield from self._chunk_rows(self._read_with_pandas(path, FileFormat.EXCEL), batch_size)
+            return
+        # read_only mode streams rows from disk instead of building the full
+        # in-memory workbook model; data_only resolves formulas to their values
+        # (matching what pandas.read_excel returns).
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            sheet = workbook.active
+            if sheet is None:
+                return
+            rows_iter = sheet.iter_rows(values_only=True)
+            header_row = next(rows_iter, None)
+            if header_row is None:
+                return
+            headers = [str(cell) if cell is not None else f"column_{index}" for index, cell in enumerate(header_row)]
+            batch: list[dict[str, Any]] = []
+            for row in rows_iter:
+                batch.append(dict(zip(headers, row, strict=False)))
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def _chunk_rows(rows: list[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
+        for start in range(0, len(rows), batch_size):
+            chunk = rows[start : start + batch_size]
+            if chunk:
+                yield chunk
+
     def write_streaming(
         self,
         batches: Iterator[list[dict[str, Any]]],
@@ -259,6 +352,7 @@ class FileTransfer:
         does not match.  Uses hmac.compare_digest to prevent timing attacks.
         """
         import hmac as hmac_mod
+
         sig_path = file_path.with_suffix(file_path.suffix + ".sig")
         if not sig_path.exists():
             raise ValueError(
@@ -279,6 +373,7 @@ class FileTransfer:
     def _write_hmac(self, file_path: Path, key: bytes | str, alg: str) -> None:
         """Write an HMAC digest of a pickle file to a companion .sig sidecar."""
         import hmac as hmac_mod
+
         key_bytes = key if isinstance(key, bytes) else key.encode()
         data = file_path.read_bytes()
         sig = hmac_mod.new(key_bytes, data, alg).hexdigest()

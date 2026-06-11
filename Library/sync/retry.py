@@ -1,4 +1,5 @@
 """Retry helper for transient database write failures."""
+
 from __future__ import annotations
 
 import logging
@@ -32,11 +33,14 @@ def with_retries(
         except Exception as exc:
             if attempt >= retry_count:
                 raise
-            cap = retry_delay_seconds * (2 ** attempt)
+            cap = retry_delay_seconds * (2**attempt)
             delay = random.uniform(0, cap)
             logger.warning(
                 "Retry %d/%d after error: %s — sleeping %.2fs",
-                attempt + 1, retry_count, exc, delay,
+                attempt + 1,
+                retry_count,
+                exc,
+                delay,
             )
             time.sleep(delay)
             if on_retry is not None:

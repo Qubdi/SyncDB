@@ -23,7 +23,10 @@ On **subsequent runs**, SyncDB adds `WHERE updated_at > <saved_value>` to the so
 
 ## How watermarks are stored
 
-Watermarks are written to a JSON file after each successful sync:
+Two storage backends are available via `watermark_storage`:
+
+**`"file"` (default)** — values are written to a JSON file after each
+successful sync:
 
 ```json
 {
@@ -31,15 +34,37 @@ Watermarks are written to a JSON file after each successful sync:
 }
 ```
 
-The default file is `.syncdb_watermarks.json` in the current working directory.
+The default file is `.syncdb_watermarks.json` in the current working
+directory.  Writes are atomic and serialised with a cross-process file lock,
+so overlapping runs on the same machine (or replicas sharing a volume) are
+safe.
+
+**`"database"`** — values live in a `__syncdb_watermarks` table on the
+*target* database (created automatically on first save) and are written with
+the engine's native atomic upsert:
+
+```python
+{
+    "source": "dbo.orders",
+    "destination": "public.orders",
+    "incremental_column": "updated_at",
+    "watermark_storage": "database",
+}
+```
+
+Use this for multi-replica deployments with independent local disks — every
+replica reads and writes the same authoritative row, and the cursor travels
+with the target data (restore the database, restore the watermark).
 
 ## Configuration reference
 
 | Key | Description | Default |
 |-----|-------------|---------|
 | `incremental_column` | Column whose max value is used as the cursor | **required** |
-| `watermark_store` | Path to the JSON file for persisting values | `.syncdb_watermarks.json` |
-| `watermark_key` | Override the key used inside the JSON file | `"source->destination:column"` |
+| `watermark_storage` | `"file"` or `"database"` (table on the target) | `"file"` |
+| `watermark_store` | Path to the JSON file (file storage only) | `.syncdb_watermarks.json` |
+| `watermark_key` | Override the key used in the store | `"source->destination:column"` |
+| `watermark_comparison` | `">"` (strict) or `">="` (re-reads boundary rows; pair with `upsert` or `append`+PK) | `">"` |
 
 ## Custom watermark key
 

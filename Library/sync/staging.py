@@ -1,4 +1,5 @@
 """Staging-table swap helpers for APPEND_STAGING transfer mode."""
+
 from __future__ import annotations
 
 import contextlib
