@@ -11,7 +11,7 @@ of SQL with their own quote characters and placeholders.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..sql import quote_identifier, validate_identifier
@@ -25,6 +25,8 @@ class MSSQLConnector(BaseConnector):
     quote_char = "["
     # pyodbc uses "?" positional placeholders (ODBC standard).
     placeholder = "?"
+    # System timestamp columns (_synced_at, deleted_at) use datetime2.
+    timestamp_type = "datetime2"
 
     @staticmethod
     def _odbc_escape(value: str) -> str:
@@ -86,50 +88,6 @@ class MSSQLConnector(BaseConnector):
                 return []
             columns = [col[0] for col in cursor.description]
             return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
-        finally:
-            cursor.close()
-
-    def execute_query_batches(
-        self,
-        query: str,
-        params: Sequence[Any] | None = None,
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        """Stream query results in batches using cursor.fetchmany()."""
-        self.connect()
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, tuple(params or []))
-            headers = [col[0] for col in cursor.description]
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(zip(headers, row, strict=False)) for row in rows]
-        finally:
-            cursor.close()
-
-    def fetch_batches(
-        self,
-        schema: str | None,
-        table: str,
-        columns: Sequence[str] | None = None,
-        where: str = "",
-        params: Sequence[Any] | None = None,
-        order_by: str = "",
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        self.connect()
-        names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-            headers = [col[0] for col in cursor.description]
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(zip(headers, row, strict=False)) for row in rows]
         finally:
             cursor.close()
 

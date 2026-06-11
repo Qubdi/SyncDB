@@ -23,6 +23,21 @@ from ..sql import QualifiedName, quote_identifier, quote_qualified
 from ..type_mapping import Column
 
 
+def result_scalar(rows: list[dict[str, Any]], key: str, default: Any = 0) -> Any:
+    """Fetch a single aggregate value from a one-row result, case-insensitively.
+
+    Drivers disagree on result-column casing (MSSQL upper-cases aliases, others
+    keep them lowercase); this is the one place that papers over the difference.
+    """
+    if not rows:
+        return default
+    lowered_key = key.lower()
+    for name, value in rows[0].items():
+        if str(name).lower() == lowered_key:
+            return default if value is None else value
+    return default
+
+
 class BaseConnector(ABC):
     """Contract implemented by supported database connectors.
 
@@ -35,23 +50,27 @@ class BaseConnector(ABC):
     Implementing a new connector — checklist
     -----------------------------------------
     1. Subclass BaseConnector and set `engine`, `quote_char`, `placeholder` as class attrs.
+       Also review `timestamp_type` and `ddl_transactional` (defaults below) and
+       override when the engine differs.
     2. Implement all @abstractmethod methods.  The shared helpers (list_tables,
        get_row_count, delete_matching_rows, update_matching_rows, copy_table_rows,
-       drop_table, upsert_batch, apply_soft_deletes_sql, execute_query_batches)
-       use only `execute_query` and `quote_char`, so they are free for the subclass
-       to inherit without override unless the engine needs different SQL.
+       drop_table, upsert_batch, apply_soft_deletes_sql, fetch_batches,
+       execute_query_batches) use only `execute_query`, `_batch_cursor`, and
+       `quote_char`, so they are free for the subclass to inherit without override
+       unless the engine needs different SQL.
     3. Make connect() idempotent: guard with `if self.connection is not None: return`.
     4. Lazy-import the driver inside connect() so users who don't need this engine
        don't pay the import cost or get ImportError at package load time.
     5. execute_query() must auto-commit DML/DDL when not self._in_transaction, and
        return [] for them.
     6. insert_batch() must auto-commit when not self._in_transaction.
-    7. fetch_batches() must use cursor.fetchmany(batch_size), not fetchall().
+    7. If the driver's default cursor buffers the full result set client-side
+       (psycopg2, pymysql), override _batch_cursor() to return a server-side /
+       unbuffered cursor so fetch_batches/execute_query_batches truly stream.
     8. create_schema() must be idempotent (IF NOT EXISTS equivalent).
     9. Override upsert_batch() with a native implementation (ON CONFLICT / MERGE /
        ON DUPLICATE KEY UPDATE) to avoid the delete+insert round-trip.
-    10. Override execute_query_batches() with cursor.fetchmany() for true streaming.
-    11. Register the connector in connections.py, connectors/__init__.py, config.py,
+    10. Register the connector in connections.py, connectors/__init__.py, config.py,
         and type_mapping.py — see connections.py module docstring for the full checklist.
     """
 
@@ -60,6 +79,13 @@ class BaseConnector(ABC):
     quote_char = '"'
     # pyodbc uses "?"; psycopg2 and pymysql use "%s".  Subclasses override accordingly.
     placeholder = "?"
+    # SQL type used for system timestamp columns (_synced_at, deleted_at).
+    # MSSQL overrides to "datetime2"; SQLite overrides to "text".
+    timestamp_type = "timestamp"
+    # Whether CREATE/DROP TABLE participate in transactions.  MySQL overrides to
+    # False (its DDL auto-commits), which disables temp-table strategies inside
+    # an explicit transaction so prior work is never committed implicitly.
+    ddl_transactional = True
 
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
@@ -158,6 +184,43 @@ class BaseConnector(ABC):
         list of column-name-to-value dicts.
         """
 
+    def _batch_cursor(self, batch_size: int) -> Any:
+        """Return the cursor used for streaming batch reads.
+
+        The default driver cursor is fine for drivers that stream from the server
+        (pyodbc, sqlite3, mysql-connector).  Drivers whose default cursor buffers
+        the entire result set client-side MUST override this with a server-side /
+        unbuffered cursor (psycopg2 named cursor, pymysql SSCursor) — otherwise
+        fetch_batches only chunks dict conversion, not memory.
+        """
+        return self.connection.cursor()
+
+    def _stream_query(
+        self,
+        query: str,
+        params: Sequence[Any] | None,
+        batch_size: int,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Execute a SELECT and yield dict rows in batches via cursor.fetchmany().
+
+        Column headers are read after the first fetch because server-side cursors
+        (psycopg2 named cursors) only populate cursor.description at that point.
+        """
+        self.connect()
+        cursor = self._batch_cursor(batch_size)
+        try:
+            cursor.execute(query, tuple(params or []))
+            headers: list[str] | None = None
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                if headers is None:
+                    headers = [col[0] for col in cursor.description]
+                yield [dict(zip(headers, row, strict=False)) for row in rows]
+        finally:
+            cursor.close()
+
     def execute_query_batches(
         self,
         query: str,
@@ -166,25 +229,12 @@ class BaseConnector(ABC):
     ) -> Iterator[list[dict[str, Any]]]:
         """Execute a SQL query and yield rows in batches of up to batch_size each.
 
-        Default implementation materialises all rows first and then slices into
-        batches.  Connectors MUST override this with cursor.fetchmany() for true
-        streaming — especially important for large result sets.  This fallback
-        issues a RuntimeWarning to surface the oversight during development.
+        Streams via cursor.fetchmany() so the full result set is never loaded
+        into Python memory at once — provided _batch_cursor() returns a cursor
+        that does not buffer client-side (see its docstring).
         """
-        warnings.warn(
-            f"{type(self).__name__} does not override execute_query_batches(); "
-            "falling back to full materialisation via execute_query(). "
-            "Override this method with cursor.fetchmany() for true streaming.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        rows = self.execute_query(query, params)
-        for i in range(0, max(1, len(rows)), batch_size):
-            chunk = rows[i:i + batch_size]
-            if chunk:
-                yield chunk
+        return self._stream_query(query, params, batch_size)
 
-    @abstractmethod
     def fetch_batches(
         self,
         schema: str | None,
@@ -197,9 +247,16 @@ class BaseConnector(ABC):
     ) -> Iterator[list[dict[str, Any]]]:
         """Yield table rows in batches of up to batch_size rows each.
 
-        Uses cursor.fetchmany() under the hood so the full result set is never
-        loaded into memory at once.
+        Streams via cursor.fetchmany() so the full result set is never loaded
+        into Python memory at once — provided _batch_cursor() returns a cursor
+        that does not buffer client-side (see its docstring).
         """
+        names = (
+            ", ".join(quote_identifier(col, self.quote_char) for col in columns)
+            if columns else "*"
+        )
+        query = f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}"
+        return self._stream_query(query, params, batch_size)
 
     @abstractmethod
     def insert_batch(
@@ -303,6 +360,30 @@ class BaseConnector(ABC):
         # (the alias is lowercase but some drivers normalise column names).
         return int(next(iter(row.values())))
 
+    def execute_update(self, query: str, params: Sequence[Any] | None = None) -> int:
+        """Execute a DML statement and return the affected-row count.
+
+        Like execute_query for DML, but reports cursor.rowcount instead of
+        discarding it — used where the caller needs the count (soft-delete
+        accounting) without a second COUNT(*) round-trip.  Drivers that cannot
+        determine the count return -1; that is normalised to 0.
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, tuple(params or []))
+            affected = int(cursor.rowcount or 0)
+            if not self._in_transaction:
+                self.connection.commit()
+            return max(0, affected)
+        finally:
+            cursor.close()
+
+    # Row count above which delete_matching_rows switches from OR-chained
+    # per-row predicates to a temp-key-table anti-join.  OR-chains produce
+    # pathological plans at scale, especially with composite keys.
+    _DELETE_KEYS_TABLE_THRESHOLD = 1000
+
     def delete_matching_rows(
         self,
         schema: str | None,
@@ -312,12 +393,19 @@ class BaseConnector(ABC):
     ) -> int:
         """Delete target rows matching incoming primary-key values.
 
-        Sub-batches the predicate to stay well under driver parameter limits
-        (pyodbc caps at ~2100; this uses a conservative 500-param ceiling per
-        statement so a 5,000-row batch with a 2-column PK stays safe).
+        Small row sets use OR-chained predicates sub-batched to stay well under
+        driver parameter limits (pyodbc caps at ~2100; this uses a conservative
+        500-param ceiling per statement).  Large row sets switch to a temp key
+        table + DELETE WHERE EXISTS, which scales far better — except inside an
+        explicit transaction on engines whose DDL auto-commits (MySQL), where
+        the temp-table CREATE would silently commit prior work.
         """
         if not rows or not primary_key:
             return 0
+        if len(rows) > self._DELETE_KEYS_TABLE_THRESHOLD and (
+            self.ddl_transactional or not self._in_transaction
+        ):
+            return self._delete_matching_rows_via_keys_table(schema, table, rows, primary_key)
         # Maximum parameters per DELETE statement; keeps each statement well
         # under pyodbc's ~2100 limit and produces manageable query plans.
         max_params = 500
@@ -341,6 +429,46 @@ class BaseConnector(ABC):
             self.execute_query(query, params)
             total += len(chunk)
         return total
+
+    def _delete_matching_rows_via_keys_table(
+        self,
+        schema: str | None,
+        table: str,
+        rows: Sequence[dict[str, Any]],
+        primary_key: Sequence[str],
+    ) -> int:
+        """Delete matching rows by bulk-loading keys into a temp table and anti-joining.
+
+        Reuses the seen-keys machinery: the incoming PKs are inserted into a
+        uid-suffixed temp table, one DELETE ... WHERE EXISTS removes the matches,
+        and the temp table is dropped in a finally block.
+        """
+        import uuid as _uuid
+        uid = _uuid.uuid4().hex[:8]
+        column_types = {col.name: col for col in self.get_columns(schema, table)}
+        pk_columns = [
+            column_types.get(pk) or Column(name=pk, data_type="text", nullable=True)
+            for pk in primary_key
+        ]
+        keys_table = self.init_seen_keys_table(schema, table, pk_columns, uid)
+        try:
+            key_rows = [{pk: row[pk] for pk in primary_key} for row in rows]
+            self.insert_batch(schema, keys_table, key_rows, list(primary_key))
+            target_ref = self.quote_table(schema, table)
+            keys_ref = self.quote_table(schema, keys_table)
+            join_conds = " AND ".join(
+                f"{target_ref}.{quote_identifier(pk, self.quote_char)} = "
+                f"{keys_ref}.{quote_identifier(pk, self.quote_char)}"
+                for pk in primary_key
+            )
+            return self.execute_update(
+                f"DELETE FROM {target_ref} WHERE EXISTS ("
+                f"SELECT 1 FROM {keys_ref} WHERE {join_conds}"
+                f")"
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                self.drop_table(schema, keys_table)
 
     def update_matching_rows(
         self,
@@ -433,19 +561,16 @@ class BaseConnector(ABC):
             for pk in primary_key
         )
         deleted_col = quote_identifier("deleted_at", self.quote_char)
-        self.execute_query(
+        # The UPDATE's own rowcount is the number of rows newly marked deleted;
+        # re-counting via WHERE deleted_at = value would need a second query and
+        # silently depend on the timestamp being unique to this run.
+        return self.execute_update(
             f"UPDATE {target_ref} SET {deleted_col} = {self.placeholder} "
             f"WHERE {deleted_col} IS NULL AND NOT EXISTS ("
             f"SELECT 1 FROM {keys_ref} WHERE {join_conds}"
             f")",
             [deleted_at_value],
         )
-        cnt = self.execute_query(
-            f"SELECT COUNT(*) AS cnt FROM {target_ref} "
-            f"WHERE {deleted_col} = {self.placeholder}",
-            [deleted_at_value],
-        )
-        return int(cnt[0].get("cnt") or cnt[0].get("CNT") or 0)
 
     def apply_soft_deletes_sql(
         self,

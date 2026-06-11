@@ -19,7 +19,7 @@ DDL queries.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -34,6 +34,9 @@ class MySQLConnector(BaseConnector):
     quote_char = "`"
     # Both mysql-connector-python and pymysql use %s placeholders.
     placeholder = "%s"
+    # MySQL DDL (CREATE/DROP/TRUNCATE TABLE) auto-commits and cannot be rolled
+    # back, so temp-table strategies must not run inside explicit transactions.
+    ddl_transactional = False
 
     def connect(self) -> None:
         """Open an idempotent MySQL connection using the first available driver."""
@@ -93,49 +96,18 @@ class MySQLConnector(BaseConnector):
         finally:
             cursor.close()
 
-    def execute_query_batches(
-        self,
-        query: str,
-        params: Sequence[Any] | None = None,
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        """Stream query results in batches using cursor.fetchmany()."""
-        self.connect()
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, tuple(params or []))
-            headers = [col[0] for col in cursor.description]
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(zip(headers, row, strict=False)) for row in rows]
-        finally:
-            cursor.close()
+    def _batch_cursor(self, batch_size: int) -> Any:
+        """Return a streaming cursor for batch reads.
 
-    def fetch_batches(
-        self,
-        schema: str | None,
-        table: str,
-        columns: Sequence[str] | None = None,
-        where: str = "",
-        params: Sequence[Any] | None = None,
-        order_by: str = "",
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        self.connect()
-        names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-            headers = [col[0] for col in cursor.description]
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(zip(headers, row, strict=False)) for row in rows]
-        finally:
-            cursor.close()
+        pymysql's default Cursor buffers the entire result set client-side at
+        execute(); SSCursor streams rows from the server as they are fetched.
+        mysql-connector-python cursors are unbuffered by default and already
+        stream, so they use the plain cursor.
+        """
+        if type(self.connection).__module__.startswith("pymysql"):
+            import pymysql.cursors
+            return self.connection.cursor(pymysql.cursors.SSCursor)
+        return self.connection.cursor()
 
     def insert_batch(
         self,

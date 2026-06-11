@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Qubdi-SyncDB"
-version = "1.0.0"
+version = "2.1.0"
 description = "ETL helper for moving tabular data between MSSQL, PostgreSQL, MySQL, and local files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,9 +48,16 @@ packages = ["syncdb", "syncdb.connectors", "syncdb.sync"]
 "syncdb.connectors" = "Library/connectors"
 "syncdb.sync"       = "Library/sync"
 
+[tool.setuptools.package-data]
+# PEP 561 marker so consumers' type checkers see the package's inline types.
+"syncdb" = ["py.typed"]
+
 [tool.pytest.ini_options]
 # Single root keeps new test directories discoverable without editing this list.
 testpaths = ["Tests/Library"]
+markers = [
+    "slow: data-volume tests that dominate suite runtime; skip with -m 'not slow' for a fast inner loop",
+]
 
 [tool.ruff]
 target-version = "py310"

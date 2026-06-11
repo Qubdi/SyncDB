@@ -12,7 +12,7 @@ more flexible SQL than the server databases.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -26,6 +26,8 @@ class SQLiteConnector(BaseConnector):
     engine = "sqlite"
     quote_char = '"'
     placeholder = "?"
+    # SQLite has no native timestamp type; ISO-8601 strings in TEXT columns.
+    timestamp_type = "text"
 
     def connect(self) -> None:
         """Open an idempotent sqlite3 connection and configure row dictionaries."""
@@ -51,48 +53,6 @@ class SQLiteConnector(BaseConnector):
                     self.connection.commit()
                 return []
             return [dict(row) for row in cursor.fetchall()]
-        finally:
-            cursor.close()
-
-    def execute_query_batches(
-        self,
-        query: str,
-        params: Sequence[Any] | None = None,
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        """Stream query results in batches using cursor.fetchmany()."""
-        self.connect()
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, tuple(params or []))
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(row) for row in rows]
-        finally:
-            cursor.close()
-
-    def fetch_batches(
-        self,
-        schema: str | None,
-        table: str,
-        columns: Sequence[str] | None = None,
-        where: str = "",
-        params: Sequence[Any] | None = None,
-        order_by: str = "",
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        self.connect()
-        names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(row) for row in rows]
         finally:
             cursor.close()
 

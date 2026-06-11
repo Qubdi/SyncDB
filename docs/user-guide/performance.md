@@ -30,13 +30,13 @@ SyncDB(source=src, target=tgt, batch_size="5%")
 
 For a table with 50 M target rows and 10 M source rows, the v1 approach required ~400 MB of RAM for the key set.  The v2 approach requires only the RAM to hold the source keys (~80 MB) and lets the database do the comparison.
 
-**Remaining caveat**: `seen_keys` (source primary keys) is still accumulated in Python during the source scan.  If the *source* table is very large (> 10 M rows with multi-column PKs), memory use grows linearly with source size.  In that case, consider splitting the soft-delete cleanup into a separate scheduled job that issues a direct database-to-database JOIN.
+Source primary keys are streamed into the temporary key table batch by batch during the source scan, so memory use stays bounded by `batch_size` on both sides — no Python-side accumulation of the source key set either.
 
 ---
 
 ## delete_matching_rows parameter limits
 
-In `APPEND` and `UPSERT` modes, existing rows are deleted before each batch is inserted.  `delete_matching_rows` builds a single `DELETE WHERE pk IN (...)` statement whose parameter count scales with `batch_size × num_pk_columns`.
+In `APPEND` mode (and the portable upsert fallback), existing rows are deleted before each batch is inserted.  For batches up to 1,000 rows, `delete_matching_rows` builds OR-chained predicates sub-batched to stay under driver parameter limits; larger batches automatically switch to a temporary key table + `DELETE ... WHERE EXISTS` anti-join, which produces far better query plans for composite primary keys.  (Inside an explicit transaction on MySQL the OR-chain is always used, because MySQL DDL auto-commits.)
 
 Driver limits:
 - **pyodbc (MSSQL)**: ~2 100 parameters per statement → keep `batch_size < 2100 / num_pk_columns`
@@ -65,6 +65,22 @@ Recommended values:
 - **I/O-bound workloads** (network latency dominates): 4–8 workers
 - **CPU-bound transforms**: match `os.cpu_count()`
 - **Connection-limited databases**: stay within the DB's `max_connections` budget
+
+---
+
+## Streaming reads
+
+`fetch_batches` and `execute_query_batches` stream from the server on every engine: PostgreSQL uses named (server-side) cursors, pymysql uses `SSCursor`, and pyodbc/sqlite3/mysql-connector cursors stream natively.  Client memory is bounded by `batch_size` regardless of table size.
+
+---
+
+## MSSQL bulk insert: fast_executemany
+
+pyodbc's `fast_executemany` is **off by default** because it can mis-size string buffers for mixed-length varchar/nvarchar batches (HY000 truncation errors).  For homogeneous bulk loads it is typically 10-100x faster:
+
+```python
+DatabaseConfig(engine="mssql", host="...", options={"fast_executemany": True})
+```
 
 ---
 

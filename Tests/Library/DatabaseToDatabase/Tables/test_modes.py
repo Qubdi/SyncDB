@@ -73,7 +73,10 @@ class _InsertOnly(LiveBase):
         }}
         self.make_sync().sync_tables(spec)
         self.assertEqual(count(self.scenario, "t_ins_accum"), 100)
-        with self.assertRaises(Exception):
+        # The duplicate-PK violation type is driver-specific (psycopg2
+        # IntegrityError, pyodbc IntegrityError, mysql errors), so the
+        # broad Exception is intentional here.
+        with self.assertRaises(Exception):  # noqa: B017
             self.make_sync().sync_tables(spec)
 
     def test_works_without_order_by(self):

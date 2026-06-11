@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..connectors.base import BaseConnector
+from ..connectors.base import BaseConnector, result_scalar
 from ..sql import quote_identifier, validate_identifier
 from .models import TableSyncResult
 
@@ -38,7 +38,7 @@ def validate_expectations(
     min_rows = expect.get("min_rows")
     if min_rows is not None:
         rows = target.execute_query(f"SELECT COUNT(*) AS n FROM {tbl}")
-        count = int((rows[0].get("n") or rows[0].get("N") or 0) if rows else 0)
+        count = int(result_scalar(rows, "n"))
         if count < int(min_rows):
             failures.append(f"expected at least {min_rows} rows, found {count}")
 
@@ -48,7 +48,7 @@ def validate_expectations(
         rows = target.execute_query(
             f"SELECT COUNT(*) AS n FROM {tbl} WHERE {col_ref} IS NULL"
         )
-        null_count = int((rows[0].get("n") or rows[0].get("N") or 0) if rows else 0)
+        null_count = int(result_scalar(rows, "n"))
         if null_count:
             failures.append(f"{column} has {null_count} null values")
 
@@ -73,7 +73,7 @@ def validate_expectations(
                 f"AS dups"
             )
 
-        dups = int((rows[0].get("dups") or rows[0].get("DUPS") or 0) if rows else 0)
+        dups = int(result_scalar(rows, "dups"))
         if dups:
             failures.append(f"{', '.join(columns)} has {dups} duplicate rows")
 
@@ -86,8 +86,8 @@ def validate_expectations(
             f"SELECT MIN({col_ref}) AS lo, MAX({col_ref}) AS hi FROM {tbl} WHERE {col_ref} IS NOT NULL"
         )
         if rows:
-            lo = rows[0].get("lo") or rows[0].get("LO")
-            hi = rows[0].get("hi") or rows[0].get("HI")
+            lo = result_scalar(rows, "lo", default=None)
+            hi = result_scalar(rows, "hi", default=None)
             if minimum is not None and lo is not None and lo < minimum:
                 failures.append(f"{column} has value below {minimum}: {lo}")
             if maximum is not None and hi is not None and hi > maximum:

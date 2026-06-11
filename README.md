@@ -37,25 +37,17 @@ pip install "Qubdi-SyncDB[all]"        # Everything
 
 ## Quick example
 
+Credentials come from environment variables via `DatabaseConfig.from_env()` —
+never hardcode passwords or connection strings with embedded credentials in
+source code or config files:
+
 ```python
-from syncdb import DatabaseConfig, ProgressMode, SyncDB
+from syncdb import DatabaseConfig, SyncDB
 
-src = DatabaseConfig(
-    engine="mssql",
-    connection_string=(
-        "Driver={ODBC Driver 17 for SQL Server};"
-        "Server=prod-sql.internal,1433;Database=operations;"
-        "UID=etl_user;PWD=etl_pass;TrustServerCertificate=yes;"
-    ),
-)
-
-dst = DatabaseConfig(
-    engine="postgresql",
-    host="analytics-db.internal",
-    database="warehouse",
-    user="loader",
-    password="loader_pass",
-)
+# Reads SRC_ENGINE, SRC_HOST, SRC_DATABASE, SRC_USER, SRC_PASSWORD, ...
+# Load these from your secrets manager at process startup.
+src = DatabaseConfig.from_env(prefix="SRC")   # e.g. SRC_ENGINE=mssql
+dst = DatabaseConfig.from_env(prefix="DST")   # e.g. DST_ENGINE=postgresql
 
 sync = SyncDB(source=src, target=dst, batch_size=20_000)
 
@@ -86,6 +78,21 @@ SyncDB summary (standard)
 +------------------+--------------+--------------+---------+---------+------+
 total: 10,042 rows in 3 batches across 2 tables in 1.3s
 ```
+
+For local development you can construct `DatabaseConfig` with explicit fields
+(`host=`, `database=`, `user=`, `password=`) — just keep real credentials out of
+version control.
+
+---
+
+## Performance notes
+
+- **MSSQL bulk loads:** pyodbc's `fast_executemany` is off by default because it
+  can mis-size string buffers for mixed-length varchar batches.  For homogeneous
+  bulk loads it is typically 10–100× faster — enable it per endpoint with
+  `DatabaseConfig(..., options={"fast_executemany": True})`.
+- **PostgreSQL / MySQL reads stream server-side** (named cursors / `SSCursor`),
+  so memory use is bounded by `batch_size` regardless of table size.
 
 ---
 

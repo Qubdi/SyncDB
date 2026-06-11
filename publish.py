@@ -132,7 +132,7 @@ def main() -> None:
     run(["twine", "check", "dist/*"] if sys.platform != "win32" else ["twine", "check", *dist_dir.glob("*")])
 
     if args.dry_run:
-        print(f"\nDry run complete. Artifacts in dist/. Version NOT uploaded.")
+        print("\nDry run complete. Artifacts in dist/. Version NOT uploaded.")
         return
 
     # 6. Upload

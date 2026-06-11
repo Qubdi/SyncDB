@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import unittest
 
 from syncdb import ProgressMode, SyncDB
 from syncdb.connections import create_connector
 from syncdb.sql import quote_identifier
+
 from Tests.Library.test_env import live_output_enabled, live_progress_mode, live_verbose
 
 from .parameters import DatabaseScenario, enabled_scenarios
@@ -32,15 +34,31 @@ def materialize_scenario_classes(module_globals: dict[str, object], *case_classe
             module_globals[name] = type(name, (case_class,), {"scenario": scenario, "__test__": True})
 
 
-def databases_reachable(scenario: DatabaseScenario) -> bool:
-    for cfg in (scenario.source.config, scenario.target.config):
+# Reachability is probed once per endpoint per pytest session.  Without this
+# cache, every scenario class's setUpClass opened fresh connections and — with
+# the Docker stack down — the default suite spent minutes waiting on connection
+# timeouts before skipping.
+_REACHABILITY_CACHE: dict[tuple[object, ...], bool] = {}
+
+
+def _endpoint_reachable(cfg) -> bool:
+    key = (cfg.engine, cfg.host, cfg.port, cfg.database, cfg.connection_string)
+    if key not in _REACHABILITY_CACHE:
+        # Short probe timeout: deciding whether to skip should take seconds,
+        # not the production 30s connect_timeout per endpoint per class.
+        probe = dataclasses.replace(cfg, connect_timeout=3)
         try:
-            connector = create_connector(cfg)
+            connector = create_connector(probe)
             connector.connect()
             connector.close()
+            _REACHABILITY_CACHE[key] = True
         except Exception:
-            return False
-    return True
+            _REACHABILITY_CACHE[key] = False
+    return _REACHABILITY_CACHE[key]
+
+
+def databases_reachable(scenario: DatabaseScenario) -> bool:
+    return _endpoint_reachable(scenario.source.config) and _endpoint_reachable(scenario.target.config)
 
 
 def source_placeholder(scenario: DatabaseScenario) -> str:

@@ -44,9 +44,8 @@ class FromEnvTests(unittest.TestCase):
         self.assertEqual(config.engine, "sqlite")
 
     def test_from_env_requires_engine(self):
-        with mock.patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(ValueError):
-                DatabaseConfig.from_env()
+        with mock.patch.dict("os.environ", {}, clear=True), self.assertRaises(ValueError):
+            DatabaseConfig.from_env()
 
 
 class ConnectionKwargsTests(unittest.TestCase):

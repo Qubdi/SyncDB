@@ -47,7 +47,7 @@ except PackageNotFoundError:
 from .config import DatabaseConfig
 from .files import FileFormat, FileTransfer, PickleSecurityWarning
 from .progress import ProgressMode, ProgressReporter
-from .sync import SyncDB, TableSyncResult, TransferMode
+from .sync import ParallelSyncError, SyncDB, TableSyncResult, TransferMode
 from .type_mapping import Column, SchemaMapper
 
 __all__ = [
@@ -57,6 +57,7 @@ __all__ = [
     "DatabaseConfig",
     "FileFormat",
     "FileTransfer",
+    "ParallelSyncError",
     "PickleSecurityWarning",
     "ProgressMode",
     "ProgressReporter",

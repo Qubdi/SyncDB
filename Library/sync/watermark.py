@@ -5,6 +5,17 @@ sync only fetches rows newer than the last run.  This is an at-least-once
 guarantee: if a sync fails mid-stream the file is NOT updated, meaning the next
 run re-reads from the last persisted value and may re-process some rows.
 
+Boundary-row caveat
+-------------------
+The default comparison is strict (``column > watermark``): a row committed AFTER
+a sync finishes but carrying a timestamp EQUAL to the saved watermark is skipped
+forever.  This happens with low-resolution timestamp columns or transactions that
+commit out of timestamp order.  Set ``"watermark_comparison": ">="`` in the table
+spec to re-read boundary rows each run — safe (idempotent) with the ``upsert``
+mode, or ``append`` mode with a primary key, both of which replace re-processed
+rows instead of duplicating them.  Do NOT combine ``>=`` with ``insert_only``,
+``snapshot``, or PK-less specs: re-read rows would be inserted again.
+
 Concurrency limitation
 ----------------------
 The watermark store is a local JSON file.  save_watermark() writes atomically
@@ -48,16 +59,32 @@ def _resolve_watermark_path(store: str | None) -> Path:
 
 
 def load_watermark(spec: dict[str, Any]) -> dict[str, Any] | None:
-    """Load incremental-sync state for a table spec, if configured."""
+    """Load incremental-sync state for a table spec, if configured.
+
+    spec["watermark_comparison"] selects the filter operator: ">" (default,
+    strict — see the boundary-row caveat in the module docstring) or ">="
+    (inclusive — re-reads boundary rows; pair with an idempotent mode).
+    """
     column = spec.get("incremental_column")
     store = spec.get("watermark_store")
     if not column:
         return None
     validate_identifier(column)
+    comparison = str(spec.get("watermark_comparison", ">")).strip()
+    if comparison not in {">", ">="}:
+        raise ValueError(
+            f"watermark_comparison must be '>' or '>=', got {comparison!r}"
+        )
     path = _resolve_watermark_path(store)
     key = spec.get("watermark_key") or f"{spec['source']}->{spec['destination']}:{column}"
     values = read_watermark_file(path)
-    return {"path": path, "key": key, "column": column, "value": values.get(key)}
+    return {
+        "path": path,
+        "key": key,
+        "column": column,
+        "value": values.get(key),
+        "comparison": comparison,
+    }
 
 
 def read_watermark_file(path: Path) -> dict[str, Any]:
@@ -97,11 +124,18 @@ def apply_watermark_filter(
     value: Any,
     quote_char: str,
     placeholder: str,
+    comparison: str = ">",
 ) -> tuple[str, list[Any]]:
-    """Append an incremental-column predicate to an existing WHERE clause."""
+    """Append an incremental-column predicate to an existing WHERE clause.
+
+    comparison is ">" (strict, default) or ">=" (inclusive — re-reads rows at
+    the boundary value; see the module docstring for when each is appropriate).
+    """
     if value in {None, ""}:
         return where_sql, params
-    condition = f"{quote_identifier(column, quote_char)} > {placeholder}"
+    if comparison not in {">", ">="}:
+        raise ValueError(f"watermark comparison must be '>' or '>=', got {comparison!r}")
+    condition = f"{quote_identifier(column, quote_char)} {comparison} {placeholder}"
     if not where_sql:
         return f" WHERE {condition} ", [*params, value]
     existing = where_sql.strip()

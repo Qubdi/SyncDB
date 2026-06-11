@@ -87,7 +87,7 @@ class SharedHelperTests(unittest.TestCase):
     def test_transaction_helpers_toggle_state(self):
         connector = self._mem()
         connector.begin()
-        connector.insert_into_scratch = True  # noqa: just to ensure attribute access is fine
+        connector.insert_into_scratch = True  # arbitrary attribute write to ensure access is fine
         connector.commit()
         self.assertFalse(connector.is_in_transaction)
         connector.begin()

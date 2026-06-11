@@ -34,7 +34,7 @@ from ..sql import build_order_by, build_where_clause, parse_qualified_name, vali
 from ..type_mapping import Column, SchemaMapper
 from . import watermark as wm
 from .inference import infer_columns
-from .models import TableSyncResult, TransferMode
+from .models import ParallelSyncError, TableSyncResult, TransferMode
 from .quality import validate_expectations
 from .reporting import emit_summary
 from .retry import with_retries
@@ -262,17 +262,19 @@ class SyncDB:
                     for f in futures:
                         f.cancel()
 
-        if errors:
-            if len(errors) == 1:
-                raise errors[0]
-            # Raise a combined error that preserves all failure details.
-            combined = RuntimeError(
-                f"{len(errors)} table(s) failed during parallel sync: "
-                + "; ".join(f"{type(e).__name__}: {e}" for e in errors)
-            )
-            raise combined from errors[0]
-
         final = [r for r in results if r is not None]
+        if errors:
+            # Attach the successful tables' results so callers can audit partial
+            # completion — those tables' writes are durable and must not vanish
+            # from the audit trail just because a sibling failed.
+            raise ParallelSyncError(
+                f"{len(errors)} table(s) failed during parallel sync "
+                f"({len(final)} completed): "
+                + "; ".join(f"{type(e).__name__}: {e}" for e in errors),
+                results=final,
+                errors=errors,
+            ) from errors[0]
+
         emit_summary(final, self.verbose, self.verbose_stream)
         return final
 
@@ -407,6 +409,8 @@ class SyncDB:
         destination: str,
         file_format: str | None = None,
         fresh_insert: bool = False,
+        hmac_key: bytes | str | None = None,
+        hmac_alg: str = "sha256",
     ) -> int:
         """Read a local file and insert it into a target table.
 
@@ -414,11 +418,18 @@ class SyncDB:
         are inferred from the first row of the file via infer_columns().
         fresh_insert=True truncates an existing table before inserting.
 
+        Rows are inserted in chunks of self.batch_size (with the configured retry
+        policy) so a large file never lands in a single oversized statement.
+
+        hmac_key enables HMAC integrity verification for pickle files — see
+        FileTransfer.read().  Always pass it when importing pickle files you did
+        not produce in the same trusted pipeline.
+
         Returns the number of rows inserted.
         """
         if self.target is None:
             raise ValueError("target connector/config is required for import")
-        rows = self.file_transfer.read(input_path, file_format)
+        rows = self.file_transfer.read(input_path, file_format, hmac_key=hmac_key, hmac_alg=hmac_alg)
         target_name = parse_qualified_name(destination, self.target.config.default_schema)
         self.target.connect()
         try:
@@ -432,7 +443,18 @@ class SyncDB:
                 self.target.truncate_table(target_name.schema, target_name.table)
             if not rows:
                 return 0
-            return self.target.insert_batch(target_name.schema, target_name.table, rows, list(rows[0].keys()))
+            columns = list(rows[0].keys())
+            total = 0
+            for start in range(0, len(rows), self.batch_size):
+                chunk = rows[start:start + self.batch_size]
+                total += self._retry(
+                    partial(
+                        self.target.insert_batch,
+                        target_name.schema, target_name.table, chunk, columns,
+                    ),
+                    on_retry=self.target.reconnect,
+                )
+            return total
         finally:
             self.target.close()
 
@@ -480,10 +502,20 @@ class SyncDB:
         target_columns = self.schema_mapper.map_columns(source_columns, source.engine, target.engine)
         target_columns = self._apply_column_options(target_columns, rename_map, spec.get("type_overrides"))
         if mode == TransferMode.SNAPSHOT:
-            target_columns = self._ensure_system_column(target_columns, "_synced_at", self._timestamp_type(target))
+            target_columns = self._ensure_system_column(target_columns, "_synced_at", target.timestamp_type)
             target_columns = [replace(col, is_primary_key=False) for col in target_columns]
         if mode == TransferMode.SOFT_DELETE:
-            target_columns = self._ensure_system_column(target_columns, "deleted_at", self._timestamp_type(target))
+            target_columns = self._ensure_system_column(target_columns, "deleted_at", target.timestamp_type)
+            if spec.get("filter"):
+                warnings.warn(
+                    f"Table '{name}': SOFT_DELETE combined with a filter marks EVERY "
+                    "target row outside the filtered source set as deleted — rows the "
+                    "filter excludes are absent from the seen-keys table and will be "
+                    "soft-deleted in bulk. Either drop the filter, or sync filtered "
+                    "subsets with mode='upsert' and handle deletions separately.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         self._sync_schema(target_name.schema, target_name.table, target_columns, result, target)
 
         if self.dry_run:
@@ -492,10 +524,6 @@ class SyncDB:
         # Per-call uid prevents concurrent syncs of the same table from colliding
         # on deterministic temp table names (staging, seen-keys).
         uid = uuid.uuid4().hex[:8]
-
-        write_schema, write_table, staging_table = self._prepare_write_target(
-            mode, target, target_name, target_columns, uid
-        )
 
         # For SOFT_DELETE, pre-create the seen-keys accumulation table so PKs can
         # be streamed directly to the database during the batch loop instead of
@@ -522,6 +550,7 @@ class SyncDB:
                 filter_sql, params,
                 watermark_cfg["column"], watermark_cfg["value"],
                 source.quote_char, source.placeholder,
+                comparison=watermark_cfg["comparison"],
             )
         order_sql = build_order_by(spec.get("order_by"), source.quote_char)
 
@@ -541,10 +570,19 @@ class SyncDB:
         on_batch = spec.get("on_batch")
         snapshot_ts = datetime.now(timezone.utc).isoformat() if mode == TransferMode.SNAPSHOT else None
 
+        # begin() must run BEFORE _prepare_write_target so FULL_REFRESH's TRUNCATE
+        # (and APPEND_STAGING's staging DDL) participate in the transaction — a
+        # truncate that auto-commits ahead of begin() would leave the target
+        # permanently empty if the sync then failed, defeating use_transaction.
         if use_tx:
             target.begin()
         reporter.start()
+        staging_table: str | None = None
         try:
+            write_schema, write_table, staging_table = self._prepare_write_target(
+                mode, target, target_name, target_columns, uid
+            )
+
             for raw_batch in source.fetch_batches(
                 source_name.schema, source_name.table,
                 columns=column_names,
@@ -669,11 +707,27 @@ class SyncDB:
         UPSERT uses the connector's native upsert; APPEND/SOFT_DELETE delete the
         incoming primary keys first (so updated rows replace their predecessors)
         and then insert; everything else is a plain insert.
+
+        The delete+insert pair is wrapped in a per-batch transaction when no
+        outer transaction is open — otherwise both statements auto-commit
+        independently and a crash between them silently drops the deleted rows.
         """
         if mode == TransferMode.UPSERT and primary_key:
             return target.upsert_batch(schema, table, batch, columns, primary_key)
         if mode in {TransferMode.APPEND, TransferMode.SOFT_DELETE} and primary_key:
-            target.delete_matching_rows(schema, table, batch, primary_key)
+            if target.is_in_transaction:
+                target.delete_matching_rows(schema, table, batch, primary_key)
+                return target.insert_batch(schema, table, batch, columns)
+            target.begin()
+            try:
+                target.delete_matching_rows(schema, table, batch, primary_key)
+                written = target.insert_batch(schema, table, batch, columns)
+                target.commit()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    target.rollback()
+                raise
+            return written
         return target.insert_batch(schema, table, batch, columns)
 
     def _prepare_write_target(
@@ -689,6 +743,12 @@ class SyncDB:
         Returns (write_schema, write_table, staging_table).  staging_table is
         non-None only for APPEND_STAGING, in which case write_table is the
         staging table name.  The caller must drop staging_table in a finally block.
+
+        Must be called AFTER target.begin() when a transaction is in use, so the
+        FULL_REFRESH TRUNCATE rolls back with everything else on failure.  Without
+        a transaction (or on MySQL, whose TRUNCATE auto-commits), a failure after
+        the truncate leaves the target empty until the next successful run —
+        prefer APPEND_STAGING when that window is unacceptable.
         """
         staging_table: str | None = None
         write_schema = target_name.schema
@@ -774,13 +834,6 @@ class SyncDB:
         if any(col.name.lower() == name.lower() for col in columns):
             return columns
         return [*columns, Column(name=name, data_type=data_type, nullable=True)]
-
-    def _timestamp_type(self, target: BaseConnector) -> str:
-        if target.engine == "mssql":
-            return "datetime2"
-        if target.engine == "sqlite":
-            return "text"
-        return "timestamp"
 
     def _prepare_batch(
         self,

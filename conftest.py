@@ -8,9 +8,9 @@ progress bars and per-sync summaries from tests that use shared make_sync helper
 
 from __future__ import annotations
 
-from collections import Counter
 import os
 import time
+from collections import Counter
 
 import pytest
 

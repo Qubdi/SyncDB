@@ -18,6 +18,6 @@ Internal layout
 """
 
 from .core import SyncDB
-from .models import TableSyncResult, TransferMode
+from .models import ParallelSyncError, TableSyncResult, TransferMode
 
-__all__ = ["SyncDB", "TableSyncResult", "TransferMode"]
+__all__ = ["ParallelSyncError", "SyncDB", "TableSyncResult", "TransferMode"]

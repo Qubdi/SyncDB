@@ -15,12 +15,16 @@ from typing import Any
 
 
 class FakeCursor:
-    def __init__(self, connection: "FakeConnection") -> None:
+    def __init__(self, connection: FakeConnection) -> None:
         self._conn = connection
         self.description: list[tuple[Any, ...]] | None = None
         self._rows: list[tuple[Any, ...]] = []
         # MSSQLConnector.insert_batch assigns this; accept it like a real pyodbc cursor.
         self.fast_executemany = False
+        # PostgresConnector._batch_cursor assigns this like a psycopg2 named cursor.
+        self.itersize = 0
+        # execute_update reads this; DB-API default for "unknown" is -1.
+        self.rowcount = -1
 
     def execute(self, query: str, params: Any = None) -> None:
         self._conn.executed.append((query, tuple(params or ())))
@@ -73,7 +77,9 @@ class FakeConnection:
         # When set, close() raises once to simulate a driver teardown failure.
         self.fail_close = False
 
-    def cursor(self) -> FakeCursor:
+    def cursor(self, *args: Any, **kwargs: Any) -> FakeCursor:
+        # Real drivers take cursor-class/name arguments (pymysql SSCursor,
+        # psycopg2 named cursors); the fake accepts and ignores them.
         return FakeCursor(self)
 
     def commit(self) -> None:

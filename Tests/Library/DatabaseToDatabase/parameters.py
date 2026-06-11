@@ -7,8 +7,8 @@ include its id in SYNCDB_LIVE_SCENARIOS.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 from syncdb import DatabaseConfig
 

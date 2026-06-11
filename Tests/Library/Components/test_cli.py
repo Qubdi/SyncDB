@@ -4,8 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from syncdb import TableSyncResult
-from syncdb import cli
+from syncdb import TableSyncResult, cli
 
 
 class CliParserTests(unittest.TestCase):

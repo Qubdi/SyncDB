@@ -7,9 +7,16 @@ can build SQL consistently and reviewers have one place to audit injection risk.
 Security model
 --------------
 Identifiers (table names, column names, schema names) are validated against a
-strict allowlist regex before being embedded in SQL strings.  User-supplied WHERE
-clauses are accepted as raw SQL but scanned for a deny-list of dangerous tokens.
-All runtime data values go through parameterised queries and are never interpolated.
+strict allowlist regex before being embedded in SQL strings.  All runtime data
+values go through parameterised queries and are never interpolated.
+
+User-supplied WHERE clauses are accepted as raw SQL and screened by
+validate_where_clause(): string literals are stripped, then the remainder is
+checked for statement terminators, comments, and a word-boundary keyword
+deny-list.  This is a hardened safety net for developer-authored filter
+expressions, NOT a SQL parser — raw WHERE strings from untrusted sources
+(user HTTP parameters, un-vetted config values) must still be treated as
+injection risks and should use the {"where": ..., "params": [...]} form.
 """
 
 from __future__ import annotations
@@ -36,9 +43,16 @@ _TYPE_RE = re.compile(
     r"(\s*\[\s*\])?$"                # optional array suffix
 )
 
-# Token-based deny-list for raw WHERE clause strings.
-# Each token is matched against a space-padded lowercase copy of the clause so
-# word-boundary patterns (e.g. " union ") don't match substrings ("reunions").
+# Deny-list machinery for raw WHERE clause strings.
+#
+# Matching strategy (see validate_where_clause):
+#   1. SQL-standard single-quoted string literals ('it''s') are stripped first,
+#      so values like "hex_val = '0x1f'" are not false-positives — to the SQL
+#      engine those characters are inert literal data.
+#   2. The remainder is checked for statement terminators / comment tokens.
+#   3. Keywords are matched on \b word boundaries, so "id IN(SELECT ...)" and
+#      "1 UNION(SELECT 1)" are caught regardless of surrounding punctuation,
+#      while identifiers like "updated_at" or "deleted_flag" are not.
 #
 # IMPORTANT — this is a hardened safety net, NOT a full SQL parser.  Raw WHERE
 # clauses from untrusted sources (user HTTP parameters, un-validated config
@@ -46,34 +60,29 @@ _TYPE_RE = re.compile(
 # developer-authored filter expressions in job configs.
 # Never add a flag to skip this check; extend the deny-list instead if a
 # legitimate token is being incorrectly blocked.
-_UNSAFE_WHERE_TOKENS = (
-    ";",               # statement terminator — stacked queries
-    "--",              # inline comment
-    "/*",              # block comment open
-    "*/",              # block comment close
-    " xp_",            # MSSQL extended stored procedures (command execution)
-    " sp_",            # MSSQL system stored procedures
-    " union ",         # UNION-based data exfiltration
-    " select ",        # subquery injection
-    " insert ",        # DML injection via subquery context
-    " update ",        # DML injection
-    " delete ",        # DML injection
-    " drop ",          # DDL injection
-    " alter ",         # DDL injection
-    " create ",        # DDL injection
-    " exec ",          # EXEC procedure call
-    " execute ",       # EXECUTE procedure call
-    " declare ",       # T-SQL variable declaration
-    " truncate ",      # DDL/DML injection
-    " sleep(",         # MySQL time-based blind injection
-    " waitfor ",       # MSSQL time-based blind injection (WAITFOR DELAY)
-    " benchmark(",     # MySQL time-based blind injection
-    " pg_sleep(",      # PostgreSQL time-based blind injection
-    " into outfile",   # MySQL arbitrary file write via SELECT INTO OUTFILE
-    " load_file(",     # MySQL arbitrary file read
-    "0x",              # hex-encoded string literals used to evade filters
-    "\x00",            # null byte injection
+_WHERE_COMMENT_TOKENS = (
+    ";",     # statement terminator — stacked queries
+    "--",    # inline comment
+    "/*",    # block comment open
+    "*/",    # block comment close
 )
+_WHERE_KEYWORD_RE = re.compile(
+    r"\b(?:"
+    r"select|insert|update|delete|merge"        # DML / subquery injection
+    r"|drop|alter|create|truncate"              # DDL injection
+    r"|grant|revoke"                            # permission changes
+    r"|union"                                   # UNION-based exfiltration
+    r"|exec|execute|declare"                    # procedure calls / T-SQL variables
+    r"|waitfor|shutdown"                        # MSSQL time-based / DoS
+    r"|sleep|benchmark|pg_sleep"                # time-based blind injection
+    r"|load_file|outfile|dumpfile"              # MySQL file read/write
+    r"|xp_\w+|sp_\w+"                           # MSSQL extended/system procedures
+    r")\b"
+)
+# Hex literals (0x41...) are an evasion vector outside of quoted strings.
+_WHERE_HEX_LITERAL_RE = re.compile(r"\b0x[0-9a-f]")
+# SQL-standard single-quoted string literal with '' escaping.
+_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 
 
 @dataclass(frozen=True)
@@ -141,13 +150,37 @@ def quote_qualified(name: QualifiedName, quote_char: str = '"') -> str:
 def validate_where_clause(where_clause: str) -> str:
     """Reject WHERE strings that contain known SQL-injection patterns.
 
-    The clause is padded with spaces before matching so token patterns that rely
-    on word boundaries (e.g. " xp_") aren't bypassed by placing them at position 0.
+    String literals are stripped before matching so legitimate values (e.g.
+    "hex_val = '0x1f'") are not blocked, then the remaining SQL text is checked
+    for comment/terminator tokens, deny-listed keywords on word boundaries, and
+    bare hex literals.  Clauses with unbalanced quotes or backslash-escaped
+    quotes are rejected outright because their literal boundaries are ambiguous.
+
+    This is a safety net for developer-authored filters, not a SQL parser; see
+    the module docstring for the threat model.
     """
-    lowered = f" {where_clause.lower()} "
-    for token in _UNSAFE_WHERE_TOKENS:
+    clause = str(where_clause)
+    if "\x00" in clause:
+        raise ValueError("Null byte detected in WHERE clause")
+    # MySQL-style backslash escaping makes literal boundaries ambiguous to a
+    # regex-based stripper; standard SQL escapes a quote by doubling it ('').
+    if "\\'" in clause:
+        raise ValueError(
+            "Backslash-escaped quote in WHERE clause; use SQL-standard '' escaping "
+            "or the parameterised {'where': ..., 'params': [...]} filter form"
+        )
+    stripped = _STRING_LITERAL_RE.sub("''", clause)
+    if "'" in stripped.replace("''", ""):
+        raise ValueError("Unbalanced string literal in WHERE clause")
+    lowered = stripped.lower()
+    for token in _WHERE_COMMENT_TOKENS:
         if token in lowered:
-            raise ValueError(f"Unsafe token '{token.strip()}' detected in WHERE clause")
+            raise ValueError(f"Unsafe token '{token}' detected in WHERE clause")
+    match = _WHERE_KEYWORD_RE.search(lowered)
+    if match:
+        raise ValueError(f"Unsafe token '{match.group()}' detected in WHERE clause")
+    if _WHERE_HEX_LITERAL_RE.search(lowered):
+        raise ValueError("Hex literal (0x...) detected in WHERE clause")
     return where_clause
 
 

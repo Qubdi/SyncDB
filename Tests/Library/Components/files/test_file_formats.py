@@ -53,8 +53,9 @@ class ParquetExcelTests(unittest.TestCase):
         self.assertEqual(count, 2)
 
     def test_pickle_dataframe_payload_normalised(self):
-        import pandas as pd
         import pickle
+
+        import pandas as pd
         path = self.dir / "frame.pickle"
         with path.open("wb") as fh:
             pickle.dump(pd.DataFrame([{"id": 1}]), fh)

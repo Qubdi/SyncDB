@@ -11,7 +11,7 @@ other engines are not forced to emulate it.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..sql import quote_identifier
@@ -78,49 +78,19 @@ class PostgresConnector(BaseConnector):
         finally:
             cursor.close()
 
-    def execute_query_batches(
-        self,
-        query: str,
-        params: Sequence[Any] | None = None,
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        """Stream query results in batches using cursor.fetchmany()."""
-        self.connect()
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, tuple(params or []))
-            headers = [col[0] for col in cursor.description]
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(zip(headers, row, strict=False)) for row in rows]
-        finally:
-            cursor.close()
+    def _batch_cursor(self, batch_size: int) -> Any:
+        """Return a named (server-side) cursor so batch reads truly stream.
 
-    def fetch_batches(
-        self,
-        schema: str | None,
-        table: str,
-        columns: Sequence[str] | None = None,
-        where: str = "",
-        params: Sequence[Any] | None = None,
-        order_by: str = "",
-        batch_size: int = 5000,
-    ) -> Iterator[list[dict[str, Any]]]:
-        self.connect()
-        names = ", ".join(quote_identifier(col, self.quote_char) for col in columns) if columns else "*"
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(f"SELECT {names} FROM {self.quote_table(schema, table)}{where}{order_by}", tuple(params or []))
-            headers = [col[0] for col in cursor.description]
-            while True:
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-                yield [dict(zip(headers, row, strict=False)) for row in rows]
-        finally:
-            cursor.close()
+        An unnamed psycopg2 cursor makes libpq materialise the ENTIRE result set
+        in client memory at execute() — fetchmany() would only chunk the dict
+        conversion.  A named cursor declares a server-side cursor and pulls
+        itersize rows per network round-trip, so memory stays bounded by
+        batch_size regardless of table size.
+        """
+        import uuid
+        cursor = self.connection.cursor(name=f"syncdb_{uuid.uuid4().hex[:12]}")
+        cursor.itersize = batch_size
+        return cursor
 
     def insert_batch(
         self,

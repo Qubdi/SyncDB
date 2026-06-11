@@ -1,13 +1,13 @@
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import mysql.connector
 import psycopg
 import pymssql
-
 
 EXPECTED_COUNTS = {
     "customers": 250_000,

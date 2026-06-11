@@ -38,9 +38,8 @@ class SyncArgumentTests(unittest.TestCase):
             {"retry_delay_seconds": -0.1},
         ]
         for kwargs in invalid_cases:
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ValueError):
-                    make_sync(source, target, **kwargs)
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                make_sync(source, target, **kwargs)
 
     def test_missing_required_connectors_raise_clear_errors(self):
         sync = SyncDB(progress_mode=ProgressMode.NONE, verbose=None)

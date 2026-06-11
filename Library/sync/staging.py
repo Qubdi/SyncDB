@@ -5,13 +5,13 @@ import contextlib
 import uuid
 import warnings
 from collections.abc import Callable, Sequence
-from typing import Any
 
+from ..connectors.base import BaseConnector
 from ..type_mapping import Column
 
 
 def create_staging_table(
-    connector: Any,
+    connector: BaseConnector,
     schema: str | None,
     table: str,
     columns: Sequence[Column],
@@ -34,7 +34,7 @@ def create_staging_table(
 
 
 def replace_from_staging(
-    connector: Any,
+    connector: BaseConnector,
     schema: str | None,
     table: str,
     staging_table: str,
@@ -52,8 +52,7 @@ def replace_from_staging(
     state, so the empty-table window cannot be eliminated on MySQL.  PostgreSQL
     and MSSQL roll back TRUNCATE correctly.
     """
-    engine = getattr(connector, "engine", None)
-    if engine == "mysql":
+    if connector.engine == "mysql":
         warnings.warn(
             "APPEND_STAGING on MySQL: TRUNCATE TABLE is DDL and cannot be rolled back. "
             "A brief window exists where the live table is empty between TRUNCATE and the "

@@ -1,5 +1,6 @@
 from syncdb import Column, DatabaseConfig, ProgressMode, SyncDB
 from syncdb.connectors.base import BaseConnector
+
 from Tests.Library.test_env import live_output_enabled, live_progress_mode, live_verbose
 
 
@@ -9,6 +10,7 @@ class MemoryConnector(BaseConnector):
         self.engine = self.config.engine
         self.quote_char = {"mssql": "[", "mysql": "`"}.get(self.engine, '"')
         self.placeholder = "?" if self.engine in {"mssql", "sqlite"} else "%s"
+        self.timestamp_type = {"mssql": "datetime2", "sqlite": "text"}.get(self.engine, "timestamp")
         self.rows_by_table = rows_by_table or {}
         self.columns_by_table = columns_by_table or {}
         self.created_schemas = []
@@ -42,6 +44,15 @@ class MemoryConnector(BaseConnector):
 
     def list_tables(self, schema=None):
         return sorted(table for table_schema, table in self.columns_by_table if table_schema == schema)
+
+    def execute_query_batches(self, query, params=None, batch_size=5000):
+        # The base implementation streams from a real DB-API cursor; the memory
+        # connector has no connection, so chunk the canned execute_query result.
+        rows = self.execute_query(query, params)
+        for start in range(0, len(rows), batch_size):
+            chunk = rows[start : start + batch_size]
+            if chunk:
+                yield chunk
 
     def fetch_batches(self, schema, table, columns=None, where="", params=None, order_by="", batch_size=5000):
         self.fetch_calls.append(

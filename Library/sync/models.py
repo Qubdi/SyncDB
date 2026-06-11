@@ -30,7 +30,31 @@ class TransferMode(str, Enum):
     # replace the live target contents from staging in a final step.
     APPEND_STAGING = "append_staging"
     # Truncate the target before loading.  Suitable for full daily refreshes.
+    # With use_transaction=True the truncate and load commit (or roll back)
+    # together.  Without it — or on MySQL, whose TRUNCATE auto-commits — a
+    # mid-sync failure leaves the target empty until the next successful run;
+    # use APPEND_STAGING when that window is unacceptable.
     FULL_REFRESH = "full_refresh"
+
+
+class ParallelSyncError(RuntimeError):
+    """Raised when one or more tables fail during a parallel sync.
+
+    Carries the audit trail that would otherwise be lost when an exception
+    aborts sync_tables: `results` holds the TableSyncResult of every table
+    that completed successfully before the failure, and `errors` holds the
+    underlying exception from each failed table.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        results: list[TableSyncResult],
+        errors: list[BaseException],
+    ) -> None:
+        super().__init__(message)
+        self.results = results
+        self.errors = errors
 
 
 @dataclass
