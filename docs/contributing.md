@@ -10,7 +10,12 @@ Thank you for considering a contribution to SyncDB! Please read the full guide i
 git clone https://github.com/qubdi/syncdb.git
 cd syncdb
 pip install -e ".[dev]"
+pre-commit install   # quality gates on commit (ruff, mypy, message format) and push (tests)
 ```
+
+Commit subjects follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`fix(sync): ...`, `feat(connectors): ...`) — see the
+[full guide](../CONTRIBUTING.md) for the type list and examples.
 
 ### Run unit tests
 

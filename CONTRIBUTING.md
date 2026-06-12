@@ -69,8 +69,8 @@ source .venv/bin/activate
 # 3. Install the package in editable mode with all dev dependencies
 pip install -e ".[dev]"
 
-# 4. Enable the pre-push git hook (runs tests before every push)
-git config core.hooksPath .githooks
+# 4. Install the git hooks (quality gates on commit and push)
+pre-commit install
 ```
 
 The `pip install -e ".[dev]"` step is required. The distribution package is
@@ -79,9 +79,47 @@ named `Qubdi-SyncDB`, while the Python import package remains `syncdb`.
 `[tool.setuptools.package-dir]`. Without installation, `import syncdb` will fail
 outside the repository root.
 
-Step 4 activates the pre-push hook stored in `.githooks/pre-push`. It runs the
-full test suite before every `git push` and blocks the push if any test fails.
-Use `git push --no-verify` to skip it when you have a good reason.
+Step 4 installs every hook defined in `.pre-commit-config.yaml` (the config
+sets `default_install_hook_types`, so one command installs all three stages):
+
+| Stage | When it runs | What it checks |
+|-------|--------------|----------------|
+| `pre-commit` | every `git commit` | ruff lint + format, mypy --strict on `Library/` |
+| `commit-msg` | every `git commit` | commit subject follows Conventional Commits (see below) |
+| `pre-push` | every `git push` | the full component test suite (fast, no database) |
+
+Use `--no-verify` on commit or push to skip the hooks when you have a good
+reason — but note that skips *all* of them, including the type check.
+
+---
+
+## Commit Messages
+
+Commit subjects must follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<optional scope>): <summary>
+```
+
+Allowed types: `feat` `fix` `docs` `style` `refactor` `perf` `test` `build`
+`chore` `ci` `revert`.  The scope is optional; the body below the subject is
+free-form.  Git-generated subjects (`Merge ...`, `Revert ...`, `fixup!`,
+`squash!`) are exempt.
+
+```
+feat(connectors): add COPY FROM bulk-load path for PostgreSQL
+fix: cap the Windows watermark lock retry loop
+perf(sync): reuse connections across tables
+docs: add order_by direction examples
+chore: release v2.2.0
+```
+
+Picking the type: `feat` = new capability, `fix` = bug fix, `perf` = faster
+with no behavior change, `refactor` = restructuring with no behavior change.
+
+The check is enforced by `Tools/check_commit_message.py` at the `commit-msg`
+stage.  It exists because the early history of bare "update" commits made
+`git bisect` and release archaeology on a published package impossible.
 
 ---
 
