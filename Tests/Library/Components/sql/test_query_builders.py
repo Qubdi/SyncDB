@@ -57,6 +57,22 @@ class QueryBuilderTests(unittest.TestCase):
     def test_build_order_by_none_returns_empty(self):
         self.assertEqual(build_order_by(None), "")
 
+    def test_build_order_by_supports_direction_suffix(self):
+        # Direction keywords are matched case-insensitively and normalised to uppercase.
+        self.assertEqual(build_order_by("updated_at DESC"), ' ORDER BY "updated_at" DESC')
+        self.assertEqual(build_order_by(["id asc", "created_at desc"]), ' ORDER BY "id" ASC, "created_at" DESC')
+        self.assertEqual(build_order_by(["id DESC"], quote_char="["), " ORDER BY [id] DESC")
+
+    def test_build_order_by_rejects_unsafe_direction_terms(self):
+        # Only ASC/DESC may follow the column; anything else is rejected so no
+        # other token can ride into the SQL string.
+        with self.assertRaises(ValueError):
+            build_order_by("id DESC; DROP TABLE users")
+        with self.assertRaises(ValueError):
+            build_order_by("id DESCENDING")
+        with self.assertRaises(ValueError):
+            build_order_by("id DESC extra")
+
     def test_validate_identifier_rejects_unsafe_names(self):
         with self.assertRaises(ValueError):
             validate_identifier("'; DROP TABLE users; --")

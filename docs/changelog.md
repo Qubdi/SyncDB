@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Batches containing duplicate primary keys no longer crash PK-driven
+  writes.**  PostgreSQL `ON CONFLICT` raises "command cannot affect row a
+  second time" and MSSQL `MERGE` errors on duplicate source rows, so a
+  CDC-style feed carrying two updates to the same key in one batch failed
+  mid-sync with a cryptic driver error.  `UPSERT`, `APPEND`, and `SOFT_DELETE`
+  batches are now de-duplicated by primary key before writing, keeping the
+  LAST occurrence (latest-wins).  `INSERT_ONLY` and `SNAPSHOT` are unaffected.
+- **MSSQL `MERGE` now uses `WITH (HOLDLOCK)`**, closing the classic MERGE race
+  where two concurrent upserts to the same target could both pass the
+  NOT MATCHED check and collide on a primary-key violation.
+- **`repr(DatabaseConfig)` no longer leaks credentials embedded in a
+  connection string.**  `connection_string` is excluded from repr the same way
+  `password` always was, so DSNs like `postgresql://user:secret@host/db` stay
+  out of tracebacks and logs.
+- A type mismatch in an `expect.range` check (e.g. a string bound against a
+  datetime column) now raises a `ValueError` naming the column and both
+  types instead of a bare `TypeError`.
+
+### New
+
+- **Schema-drift warnings.**  When an existing target column no longer matches
+  the mapped source type — or the source string length has grown past the
+  target's — schema sync emits a `RuntimeWarning` naming the table, column,
+  and both types up front, instead of letting the drift surface later as an
+  opaque truncation or conversion error at insert time.  (Schema evolution
+  still never ALTERs an existing column; SQLite targets are exempt because
+  its types are affinity hints.)
+- **`order_by` accepts a direction suffix**: `"updated_at DESC"` (or `ASC`,
+  case-insensitive).  Only the two literal keywords are accepted after the
+  validated column name.
+
+### Changed
+
+- **Parallel sync reuses one connector pair per worker thread** instead of
+  opening and closing fresh connections for every table, so connection setup
+  (TLS handshakes especially) no longer dominates runs with many small
+  tables.  A pair whose table failed is discarded, never reused.
+
+### Internal
+
+- Documented the read-side recovery contract on the batch loop: source reads
+  are not retried mid-stream (server-side cursors cannot resume); re-run the
+  job — watermark specs resume from the last committed watermark.
+- The `transform` and `on_batch` spec callbacks are now fully typed
+  (`TransformFn`, `OnBatchFn`).
+- Failed pre-sync `COUNT(*)` queries (usually missing SELECT permission) are
+  now logged at DEBUG level instead of silently disabling progress totals.
+- New concurrency tests hammer the watermark file store from multiple threads
+  and multiple OS processes to prove the cross-process lock loses no keys.
+
 ## 2.1.0 — Reliability and security hardening
 
 ### Fixed

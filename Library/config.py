@@ -80,7 +80,9 @@ class DatabaseConfig:
     """
 
     engine: str | Engine
-    connection_string: str | None = None
+    # repr=False: a DSN routinely embeds the password ("postgresql://user:pw@host"),
+    # so it must stay out of repr/tracebacks/logs just like the password field.
+    connection_string: str | None = field(default=None, repr=False)
     host: str | None = None
     port: int | None = None
     database: str | None = None

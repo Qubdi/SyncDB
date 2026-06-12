@@ -63,7 +63,7 @@ class MSSQLConnectorTests(unittest.TestCase):
             ["id"],
         )
         sql = connector.connection.last_query()
-        self.assertIn("MERGE INTO [dbo].[orders] AS target", sql)
+        self.assertIn("MERGE INTO [dbo].[orders] WITH (HOLDLOCK) AS target", sql)
         self.assertIn("ON (target.[id] = source.[id])", sql)
         self.assertIn("WHEN MATCHED THEN UPDATE SET target.[status] = source.[status]", sql)
         self.assertIn("WHEN NOT MATCHED THEN INSERT", sql)

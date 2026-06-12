@@ -16,6 +16,40 @@ from dataclasses import dataclass
 
 from .config import normalize_engine
 
+# Spelling variants that name the same storage type.  INFORMATION_SCHEMA reports
+# verbose names ("timestamp without time zone", "character varying") that
+# SchemaMapper never emits, and unicode-vs-ansi string variants (nvarchar/varchar)
+# differ in encoding, not shape.  Used by base_type_name() so schema-drift
+# comparison matches semantics rather than spelling.
+_TYPE_SYNONYMS: dict[str, str] = {
+    "timestamp without time zone": "timestamp",
+    "timestamp with time zone": "timestamptz",
+    "time without time zone": "time",
+    "time with time zone": "timetz",
+    "character varying": "varchar",
+    "character": "char",
+    "nvarchar": "varchar",
+    "nchar": "char",
+    "int": "integer",
+    "int4": "integer",
+    "int8": "bigint",
+    "bool": "boolean",
+    "decimal": "numeric",
+    "dec": "numeric",
+}
+
+
+def base_type_name(data_type: str) -> str:
+    """Return the canonical base name of a SQL type for drift comparison.
+
+    Strips length/precision modifiers ("varchar(50)" → "varchar") and folds
+    cross-spelling synonyms ("timestamp without time zone" → "timestamp",
+    "nvarchar" → "varchar") so two types compare equal exactly when values of
+    one can be stored in the other without a conversion failure.
+    """
+    base = (data_type or "").split("(", 1)[0].strip().lower()
+    return _TYPE_SYNONYMS.get(base, base)
+
 
 @dataclass(frozen=True)
 class Column:

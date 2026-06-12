@@ -84,10 +84,21 @@ def validate_expectations(
         if rows:
             lo = result_scalar(rows, "lo", default=None)
             hi = result_scalar(rows, "hi", default=None)
-            if minimum is not None and lo is not None and lo < minimum:
-                failures.append(f"{column} has value below {minimum}: {lo}")
-            if maximum is not None and hi is not None and hi > maximum:
-                failures.append(f"{column} has value above {maximum}: {hi}")
+            try:
+                if minimum is not None and lo is not None and lo < minimum:
+                    failures.append(f"{column} has value below {minimum}: {lo}")
+                if maximum is not None and hi is not None and hi > maximum:
+                    failures.append(f"{column} has value above {maximum}: {hi}")
+            except TypeError as exc:
+                # A bare TypeError ("'<' not supported between ...") names neither
+                # the column nor the fix; drivers return Decimal/datetime where a
+                # config naturally holds float/str.
+                raise ValueError(
+                    f"range check for column '{column}' cannot compare database values "
+                    f"(min={lo!r}, max={hi!r}) with the configured bounds "
+                    f"(min={minimum!r}, max={maximum!r}); use a bound of the column's "
+                    "Python type (e.g. a number or datetime, not a string)"
+                ) from exc
 
     result.expectations_failed = failures
     if failures:

@@ -29,6 +29,19 @@ class DatabaseConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DatabaseConfig(engine="mysql", host="localhost", database="syncdb")
 
+    def test_repr_never_exposes_credentials(self):
+        # password is a dedicated field, but a DSN routinely embeds one too —
+        # both must stay out of repr/tracebacks/logs.
+        config = DatabaseConfig(
+            engine="postgresql",
+            connection_string="postgresql://etl_user:S3cretPW@db.example.com/prod",
+        )
+        self.assertNotIn("S3cretPW", repr(config))
+        config = DatabaseConfig(
+            engine="postgresql", host="h", database="d", user="u", password="S3cretPW"
+        )
+        self.assertNotIn("S3cretPW", repr(config))
+
 
 if __name__ == "__main__":
     unittest.main()

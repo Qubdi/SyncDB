@@ -34,7 +34,7 @@ Returns `list[TableSyncResult]` — one result per table. See {doc}`../api/model
 | `mode` | no | Transfer mode. Default: `"append"` |
 | `batch_size` | no | Override batch size for this table only |
 | `primary_key` | no | PK column(s). Auto-detected from source when omitted |
-| `order_by` | no | Column(s) to sort source reads for deterministic batching |
+| `order_by` | no | Column(s) to sort source reads for deterministic batching; each may carry a direction, e.g. `"updated_at DESC"` |
 | `filter` | no | Restrict which source rows are read |
 | `rename` | no | Map of source column names → target column names |
 | `type_overrides` | no | Map of target column name → target SQL type |
@@ -126,6 +126,26 @@ Parameterized filters use `?` placeholders and never interpolate values into the
 ```
 
 SyncDB validates WHERE clauses and rejects dangerous tokens (`;`, `--`, `/*`, `xp_`, `sp_`). Use parameterized filters whenever the values come from user input or external systems.
+
+---
+
+## Ordering source reads
+
+`order_by` sorts the source query so batches are deterministic between runs.
+Each entry is a column name, optionally followed by `ASC` or `DESC`
+(case-insensitive):
+
+```python
+"orders": {
+    "source": "dbo.orders",
+    "destination": "public.orders",
+    "order_by": ["customer_id", "updated_at DESC"],
+}
+```
+
+Column names are validated against the same strict identifier rules as
+everywhere else, and only the literal `ASC`/`DESC` keywords are accepted after
+a name — anything else raises `ValueError`.
 
 ---
 

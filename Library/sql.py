@@ -208,8 +208,24 @@ def build_where_clause(filter_cfg: dict[str, Any] | str | None) -> tuple[str, li
     return (f" WHERE {validate_where_clause(where)} ", params) if where else ("", [])
 
 
+def _order_by_term(term: str, quote_char: str) -> str:
+    """Quote one ORDER BY term of the form "column" or "column ASC|DESC".
+
+    The column part goes through quote_identifier (and therefore
+    validate_identifier); the direction keyword is matched against a two-word
+    allowlist, so no other token can ride along into the SQL string.
+    """
+    parts = str(term).strip().split()
+    if len(parts) == 1:
+        return quote_identifier(parts[0], quote_char)
+    if len(parts) == 2 and parts[1].upper() in {"ASC", "DESC"}:
+        return f"{quote_identifier(parts[0], quote_char)} {parts[1].upper()}"
+    raise ValueError(f"order_by term must be 'column' or 'column ASC|DESC', got: {term!r}")
+
+
 def build_order_by(order_by: list[str] | tuple[str, ...] | str | None, quote_char: str = '"') -> str:
-    """Build a quoted ORDER BY clause from a column name or list of column names.
+    """Build a quoted ORDER BY clause from column names, each optionally
+    suffixed with a direction ("updated_at DESC").
 
     Returns "" when order_by is falsy so callers can concatenate the result
     directly into a query string.  Defaults to the SQL-standard double-quote so a
@@ -219,5 +235,5 @@ def build_order_by(order_by: list[str] | tuple[str, ...] | str | None, quote_cha
     if not order_by:
         return ""
     columns = [order_by] if isinstance(order_by, str) else list(order_by)
-    quoted = [quote_identifier(column, quote_char) for column in columns]
+    quoted = [_order_by_term(column, quote_char) for column in columns]
     return " ORDER BY " + ", ".join(quoted)

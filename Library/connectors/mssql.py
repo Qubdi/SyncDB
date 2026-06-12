@@ -167,8 +167,11 @@ class MSSQLConnector(BaseConnector):
             chunk = records[i : i + sub_size]
             row_placeholders = ", ".join(["?"] * len(columns))
             values_rows = ", ".join(f"({row_placeholders})" for _ in chunk)
+            # HOLDLOCK closes the classic MERGE race: without it two concurrent
+            # writers can both pass the NOT MATCHED check and collide on a PK
+            # violation at insert time.
             merge_sql = (
-                f"MERGE INTO {target_ref} AS target "
+                f"MERGE INTO {target_ref} WITH (HOLDLOCK) AS target "
                 f"USING (VALUES {values_rows}) AS source({source_col_sql}) "
                 f"ON ({on_clause}) "
                 f"{when_matched} "

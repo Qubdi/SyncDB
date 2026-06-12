@@ -39,7 +39,7 @@ from ..sql import (
     validate_identifier,
     validate_type,
 )
-from ..type_mapping import Column, SchemaMapper
+from ..type_mapping import Column, SchemaMapper, base_type_name
 from . import watermark as wm
 from .inference import infer_columns
 from .models import ParallelSyncError, TableSyncResult, TransferMode
@@ -49,6 +49,12 @@ from .retry import with_retries
 from .staging import create_staging_table, replace_from_staging
 
 logger = logging.getLogger(__name__)
+
+# A transform receives one fetched batch (defensive copies) and either mutates
+# the rows in place (returning None) or returns a replacement list of rows.
+TransformFn = Callable[[list[dict[str, Any]]], "list[dict[str, Any]] | None"]
+# on_batch receives the running TableSyncResult after each written batch.
+OnBatchFn = Callable[[TableSyncResult], None]
 
 # Allowlist of valid DatabaseConfig constructor fields.  Used by from_job_config
 # to reject unexpected keys from user-supplied config files before they reach the
@@ -128,8 +134,8 @@ class _TableSyncPlan:
     order_sql: str
     batch_size: int
     total: int | None
-    transform: Any
-    on_batch: Any
+    transform: TransformFn | None
+    on_batch: OnBatchFn | None
     snapshot_ts: str | None
     watermark_cfg: dict[str, Any] | None
 
@@ -285,41 +291,82 @@ class SyncDB:
         source_config = self.source.config
         target_config = self.target.config
 
+        # One connector pair per WORKER THREAD, not per table: reconnecting for
+        # every table makes connection setup (TLS handshakes especially) dominate
+        # runs with many small tables.  Pairs are cached in thread-local storage;
+        # all_connectors tracks every live pair for teardown in the finally block.
+        thread_pair = threading.local()
+        all_connectors: list[BaseConnector] = []
+        connectors_lock = threading.Lock()
+
+        def get_pair() -> tuple[BaseConnector, BaseConnector]:
+            pair: tuple[BaseConnector, BaseConnector] | None = getattr(thread_pair, "pair", None)
+            if pair is None:
+                src = factory(source_config)
+                tgt = factory(target_config)
+                src.connect()
+                tgt.connect()
+                pair = (src, tgt)
+                thread_pair.pair = pair
+                with connectors_lock:
+                    all_connectors.extend(pair)
+            return pair
+
+        def discard_pair() -> None:
+            # After a failure the connection state is unknown (psycopg2, for one,
+            # leaves the session in an aborted transaction); close and forget the
+            # pair so a later table on this thread gets a fresh one.
+            pair = getattr(thread_pair, "pair", None)
+            if pair is None:
+                return
+            thread_pair.pair = None
+            with connectors_lock:
+                for connector in pair:
+                    if connector in all_connectors:
+                        all_connectors.remove(connector)
+            for connector in pair:
+                with contextlib.suppress(Exception):
+                    connector.close()
+
         def sync_in_thread(index: int, name: str, spec: dict[str, Any]) -> tuple[int, TableSyncResult]:
             if abort.is_set():
                 raise RuntimeError(f"Sync of '{name}' cancelled due to earlier failure")
-            src = factory(source_config)
-            tgt = factory(target_config)
+            src, tgt = get_pair()
             reporter = ProgressReporter(ProgressMode.NONE)
-            src.connect()
-            tgt.connect()
             try:
                 return index, self._sync_one_table(
                     name, spec, src, tgt, progress=reporter, sync_id=sync_id, abort=abort
                 )
-            finally:
-                src.close()
-                tgt.close()
+            except BaseException:
+                discard_pair()
+                raise
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {
-                executor.submit(sync_in_thread, i, name, spec): name for i, (name, spec) in enumerate(specs.items())
-            }
-            for future in as_completed(futures):
-                try:
-                    idx, result = future.result()
-                    results[idx] = result
-                except Exception as exc:
-                    errors.append(exc)
-                    _log.error(
-                        "Table '%s' failed: %s",
-                        futures[future],
-                        exc,
-                        exc_info=True,
-                    )
-                    abort.set()
-                    for f in futures:
-                        f.cancel()
+        try:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(sync_in_thread, i, name, spec): name for i, (name, spec) in enumerate(specs.items())
+                }
+                for future in as_completed(futures):
+                    try:
+                        idx, result = future.result()
+                        results[idx] = result
+                    except Exception as exc:
+                        errors.append(exc)
+                        _log.error(
+                            "Table '%s' failed: %s",
+                            futures[future],
+                            exc,
+                            exc_info=True,
+                        )
+                        abort.set()
+                        for f in futures:
+                            f.cancel()
+        finally:
+            with connectors_lock:
+                remaining = list(all_connectors)
+            for connector in remaining:
+                with contextlib.suppress(Exception):
+                    connector.close()
 
         final = [r for r in results if r is not None]
         if errors:
@@ -819,7 +866,15 @@ class SyncDB:
         write_table: str,
         seen_keys_table: str | None,
     ) -> None:
-        """The batch loop: fetch → prepare → write, with retries and progress."""
+        """The batch loop: fetch → prepare → write, with retries and progress.
+
+        Retries apply to WRITES only.  Source reads stream from a single
+        server-side cursor that cannot be resumed mid-result-set, so a read
+        failure (network blip, cancelled query) fails the whole table sync.
+        The recovery contract is re-running the job: watermark specs resume
+        from the last COMMITTED watermark (at-least-once), APPEND_STAGING
+        leaves the live table untouched, and FULL_REFRESH re-runs from zero.
+        """
         for raw_batch in source.fetch_batches(
             plan.source_name.schema,
             plan.source_name.table,
@@ -906,6 +961,17 @@ class SyncDB:
         outer transaction is open — otherwise both statements auto-commit
         independently and a crash between them silently drops the deleted rows.
         """
+        if primary_key and mode in {TransferMode.UPSERT, TransferMode.APPEND, TransferMode.SOFT_DELETE}:
+            # Duplicate PKs within one statement are rejected by the engines
+            # themselves: PostgreSQL ON CONFLICT raises "command cannot affect
+            # row a second time" and MSSQL MERGE errors on duplicate source
+            # rows; the APPEND delete+insert pair would hit a PK violation on
+            # the second insert.  Keep the LAST occurrence — CDC-style feeds
+            # order updates oldest-to-newest, so last-wins preserves the most
+            # recent version of the row.
+            deduped = {tuple(row.get(pk) for pk in primary_key): row for row in batch}
+            if len(deduped) < len(batch):
+                batch = list(deduped.values())
         if mode == TransferMode.UPSERT and primary_key:
             return target.upsert_batch(schema, table, batch, columns, primary_key)
         if mode in {TransferMode.APPEND, TransferMode.SOFT_DELETE} and primary_key:
@@ -984,10 +1050,13 @@ class SyncDB:
         source_columns = {col.name.lower(): col for col in columns}
 
         for key, col in source_columns.items():
-            if key not in target_columns:
+            existing = target_columns.get(key)
+            if existing is None:
                 result.columns_added.append(col.name)
                 if not self.dry_run:
                     target.add_column(schema, table, col)
+            else:
+                self._warn_type_drift(table, col, existing, target.engine)
 
         if self.drop_extra_columns:
             for key, col in target_columns.items():
@@ -995,6 +1064,43 @@ class SyncDB:
                     result.columns_dropped.append(col.name)
                     if not self.dry_run:
                         target.drop_column(schema, table, col.name)
+
+    @staticmethod
+    def _warn_type_drift(table: str, source_col: Column, target_col: Column, target_engine: str) -> None:
+        """Warn when an existing target column no longer matches the mapped source type.
+
+        Schema evolution only adds and drops columns — it never ALTERs an
+        existing column's type — so drift (e.g. a source varchar(50) widened to
+        varchar(200)) otherwise surfaces as an opaque truncation or conversion
+        error at insert time, naming neither the column nor the fix.  SQLite is
+        skipped: its column types are affinity hints, not constraints.
+        """
+        if target_engine == "sqlite":
+            return
+        source_base = base_type_name(source_col.data_type)
+        target_base = base_type_name(target_col.data_type)
+        if source_base != target_base:
+            warnings.warn(
+                f"Table '{table}', column '{target_col.name}': existing target type "
+                f"'{target_col.data_type}' does not match the mapped source type "
+                f"'{source_col.data_type}'. Schema sync never alters existing columns, "
+                "so incompatible values will fail at insert time — ALTER the column "
+                "manually, or set 'type_overrides' if the difference is intentional.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        source_len = source_col.char_length or 0
+        target_len = target_col.char_length or 0
+        if 0 < target_len < source_len:
+            warnings.warn(
+                f"Table '{table}', column '{target_col.name}': source length {source_len} "
+                f"exceeds the existing target length {target_len}; longer values will fail "
+                "or be truncated at insert time. Widen the target column manually "
+                "(schema sync never alters existing columns).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     def _normalize_rename_map(self, rename: dict[str, str] | None) -> dict[str, str]:
         mapping = dict(rename or {})
@@ -1031,7 +1137,7 @@ class SyncDB:
         self,
         raw_batch: list[dict[str, Any]],
         rename_map: dict[str, str],
-        transform: Any,
+        transform: TransformFn | None,
         target_columns: Sequence[str],
         mode: TransferMode,
         snapshot_ts: str | None,
@@ -1066,7 +1172,10 @@ class SyncDB:
     ) -> int | None:
         try:
             return source.get_row_count(schema, table, where, params)
-        except Exception:
+        except Exception as exc:
+            # Progress totals degrade gracefully, but the cause (usually missing
+            # SELECT permission) should be discoverable without a debugger.
+            logger.debug("COUNT(*) on %s failed; progress totals disabled: %s", table, exc)
             return None
 
     @staticmethod
