@@ -29,6 +29,7 @@ class TransactionStateTests(unittest.TestCase):
     def test_is_in_transaction_reflects_begin_commit_rollback(self):
         connector = SQLiteConnector(DatabaseConfig(engine="sqlite", database=":memory:"))
         connector.connect()
+        self.addCleanup(connector.close)
         self.assertFalse(connector.is_in_transaction)
         connector.begin()
         self.assertTrue(connector.is_in_transaction)
@@ -43,6 +44,7 @@ class DeprecatedSoftDeleteTests(unittest.TestCase):
     def _seed(self):
         connector = SQLiteConnector(DatabaseConfig(engine="sqlite", database=":memory:"))
         connector.connect()
+        self.addCleanup(connector.close)
         connector.create_table(
             None, "t",
             [Column("id", "integer", is_primary_key=True), Column("deleted_at", "text")],
@@ -75,6 +77,7 @@ class SharedHelperTests(unittest.TestCase):
     def _mem(self):
         connector = SQLiteConnector(DatabaseConfig(engine="sqlite", database=":memory:"))
         connector.connect()
+        self.addCleanup(connector.close)
         return connector
 
     def test_ping_true_when_reachable(self):

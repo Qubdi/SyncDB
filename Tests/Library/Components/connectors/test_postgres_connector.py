@@ -1,3 +1,4 @@
+import sys
 import unittest
 from unittest import mock
 
@@ -7,8 +8,8 @@ from syncdb.connectors import PostgresConnector
 from .fakedb import FakeConnection
 
 
-def make_connector(results=None) -> PostgresConnector:
-    config = DatabaseConfig(engine="postgresql", host="h", database="db", user="u", password="p")
+def make_connector(results=None, **config_kwargs) -> PostgresConnector:
+    config = DatabaseConfig(engine="postgresql", host="h", database="db", user="u", password="p", **config_kwargs)
     connector = PostgresConnector(config)
     connector.connection = FakeConnection(results=results or [])
     return connector
@@ -134,6 +135,83 @@ class PostgresConnectorTests(unittest.TestCase):
     def test_get_primary_keys(self):
         connector = make_connector([("constraint_type = 'PRIMARY KEY'", ["column_name"], [("id",), ("sub",)])])
         self.assertEqual(connector.get_primary_keys("public", "t"), ["id", "sub"])
+
+
+class PostgresCopyTests(unittest.TestCase):
+    def test_use_copy_routes_insert_batch_through_copy_expert(self):
+        connector = make_connector(options={"use_copy": True})
+        n = connector.insert_batch(
+            "public", "t",
+            [{"id": 1, "v": "a"}, {"id": 2, "v": None}],
+            ["id", "v"],
+        )
+        self.assertEqual(n, 2)
+        sql, payload = connector.connection.executed[-1]
+        self.assertIn('COPY "public"."t" ("id", "v") FROM STDIN', sql)
+        self.assertIn("FORMAT csv", sql)
+        self.assertEqual(payload, '1,"a"\n2,\\N\n')
+        self.assertEqual(connector.connection.commits, 1)
+
+    def test_copy_field_renders_types_safely(self):
+        field = PostgresConnector._copy_field
+        self.assertEqual(field(None), "\\N")
+        self.assertEqual(field(True), "true")
+        self.assertEqual(field(False), "false")
+        self.assertEqual(field(42), "42")
+        # Strings are always quoted so data can never forge the NULL marker
+        # and embedded quotes/commas/newlines stay one CSV field.
+        self.assertEqual(field("\\N"), '"\\N"')
+        self.assertEqual(field(""), '""')
+        self.assertEqual(field('say "hi", twice'), '"say ""hi"", twice"')
+        self.assertEqual(field({"k": 1}), '"{""k"": 1}"')
+        self.assertEqual(field(b"\x01\x02"), '"\\x0102"')
+
+    def test_without_use_copy_option_execute_values_path_is_used(self):
+        connector = make_connector()
+        with mock.patch("psycopg2.extras.execute_values") as ev:
+            connector.insert_batch("public", "t", [{"id": 1}], ["id"])
+        self.assertEqual(ev.call_count, 1)
+
+
+class PostgresConnectTests(unittest.TestCase):
+    def test_connect_renames_database_kwarg_and_sets_statement_timeout(self):
+        fake_pg = mock.MagicMock()
+        fake_conn = FakeConnection()
+        fake_pg.connect.return_value = fake_conn
+        config = DatabaseConfig(
+            engine="postgresql", host="h", database="db", user="u", password="p", query_timeout=5
+        )
+        connector = PostgresConnector(config)
+        with mock.patch.dict(
+            sys.modules,
+            {"psycopg2": fake_pg, "psycopg2.extensions": fake_pg.extensions, "psycopg2.extras": fake_pg.extras},
+        ):
+            connector.connect()
+        kwargs = fake_pg.connect.call_args.kwargs
+        # psycopg2 takes "dbname", not "database" — the rename must happen here.
+        self.assertEqual(kwargs["dbname"], "db")
+        self.assertNotIn("database", kwargs)
+        self.assertEqual(kwargs["user"], "u")
+        self.assertIn("SET statement_timeout = 5000", fake_conn.last_query())
+
+    def test_connect_passes_connection_string_verbatim(self):
+        fake_pg = mock.MagicMock()
+        fake_pg.connect.return_value = FakeConnection()
+        config = DatabaseConfig(engine="postgresql", connection_string="postgresql://u:p@h/db")
+        connector = PostgresConnector(config)
+        with mock.patch.dict(
+            sys.modules,
+            {"psycopg2": fake_pg, "psycopg2.extensions": fake_pg.extensions, "psycopg2.extras": fake_pg.extras},
+        ):
+            connector.connect()
+        args = fake_pg.connect.call_args.args
+        self.assertEqual(args[0], "postgresql://u:p@h/db")
+
+    def test_connect_is_idempotent(self):
+        connector = make_connector()
+        existing = connector.connection
+        connector.connect()  # must not replace the live connection
+        self.assertIs(connector.connection, existing)
 
 
 if __name__ == "__main__":

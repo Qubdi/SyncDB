@@ -8,7 +8,9 @@ include its id in SYNCDB_LIVE_SCENARIOS.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from syncdb import DatabaseConfig
 
@@ -84,6 +86,19 @@ MSSQL = DatabaseEndpoint(
     schema="dbo",
 )
 
+# SQLite sync target: a file in the system temp directory, so cross-engine
+# coverage of the SQLite connector needs no extra container.  Target-only —
+# SQLite has no seeded source data, so *_to_sqlite scenarios reuse the Docker
+# databases as sources.
+SQLITE = DatabaseEndpoint(
+    id="sqlite",
+    config=DatabaseConfig(
+        engine="sqlite",
+        database=str(Path(tempfile.gettempdir()) / "qubdi_syncdb_live_target.sqlite"),
+    ),
+    schema=None,
+)
+
 
 SCENARIOS: dict[str, DatabaseScenario] = {
     "postgresql_to_mysql": DatabaseScenario(
@@ -122,9 +137,32 @@ SCENARIOS: dict[str, DatabaseScenario] = {
         source=MSSQL,
         target=MYSQL,
     ),
+    "postgresql_to_sqlite": DatabaseScenario(
+        id="postgresql_to_sqlite",
+        label="PostgreSQL to SQLite",
+        source=POSTGRES,
+        target=SQLITE,
+    ),
+    "mysql_to_sqlite": DatabaseScenario(
+        id="mysql_to_sqlite",
+        label="MySQL to SQLite",
+        source=MYSQL,
+        target=SQLITE,
+    ),
+    "mssql_to_sqlite": DatabaseScenario(
+        id="mssql_to_sqlite",
+        label="MSSQL to SQLite",
+        source=MSSQL,
+        target=SQLITE,
+    ),
 }
 
-DEFAULT_SCENARIOS = tuple(SCENARIOS)
+# SQLite-target scenarios are opt-in (SYNCDB_LIVE_SCENARIOS=all or explicit
+# ids) until the shared assertions are verified against SQLite's looser type
+# system; the default matrix stays the verified server-to-server pairs.
+DEFAULT_SCENARIOS = tuple(
+    scenario_id for scenario_id, scenario in SCENARIOS.items() if scenario.target.id != "sqlite"
+)
 
 
 def enabled_scenarios() -> tuple[DatabaseScenario, ...]:

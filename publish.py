@@ -124,50 +124,62 @@ def main() -> None:
         run([sys.executable, "-m", "ruff", "check", "Library/"])
         print("\n--- Quality gate: mypy ---")
         run([sys.executable, "-m", "mypy", "Library/"])
+        print("\n--- Quality gate: pip-audit ---")
+        run([sys.executable, "-m", "pip_audit"])
 
-    # 2. Bump version in pyproject.toml
+    # 2. Bump version in pyproject.toml.  Reverted below if the build or check
+    # fails (or on --dry-run) so a failed release never leaves a dirty bump.
     write_version(new)
     print(f"\nUpdated pyproject.toml: version = \"{new}\"")
 
-    # 3. Clean previous dist/
-    dist_dir = Path("dist")
-    if dist_dir.exists():
-        shutil.rmtree(dist_dir)
-        print("Removed old dist/")
+    try:
+        # 3. Clean previous build artifacts
+        for stale in ("dist", "build"):
+            stale_dir = Path(stale)
+            if stale_dir.exists():
+                shutil.rmtree(stale_dir)
+                print(f"Removed old {stale}/")
 
-    # 4. Build
-    print("\n--- Building ---")
-    run([sys.executable, "-m", "build"])
+        # 4. Build
+        print("\n--- Building ---")
+        run([sys.executable, "-m", "build"])
 
-    # 5. Verify package.  Paths are stringified explicitly: Path objects in the
-    # argv list crash the command logging on Windows ("dist/*" globbing is also
-    # shell-dependent, so expand it here for all platforms).
-    artifacts = sorted(str(p) for p in dist_dir.glob("*"))
-    if not artifacts:
-        sys.exit("Build produced no artifacts in dist/")
-    print("\n--- Checking package ---")
-    run(["twine", "check", *artifacts])
+        # 5. Verify package.  Paths are stringified explicitly: Path objects in the
+        # argv list crash the command logging on Windows ("dist/*" globbing is also
+        # shell-dependent, so expand it here for all platforms).
+        artifacts = sorted(str(p) for p in Path("dist").glob("*"))
+        if not artifacts:
+            sys.exit("Build produced no artifacts in dist/")
+        print("\n--- Checking package ---")
+        run(["twine", "check", *artifacts])
+    except SystemExit:
+        write_version(current)
+        print(f"\nBuild/check failed — reverted pyproject.toml to version {current}.")
+        raise
 
     if args.dry_run:
-        print("\nDry run complete. Artifacts in dist/. Version NOT uploaded.")
+        write_version(current)
+        print("\nDry run complete. Artifacts in dist/. Version bump reverted; nothing uploaded.")
         return
 
     # 6. Upload
     print("\n--- Uploading to PyPI ---")
     run(["twine", "upload", *artifacts])
 
-    # 7. Git tag
+    # 7. Git tag.  These run with check=True: a release that uploaded to PyPI
+    # but silently failed to commit or tag is exactly the inconsistency this
+    # script exists to prevent.
     if not args.no_tag:
         tag = f"v{new}"
-        run(["git", "add", "pyproject.toml"], check=False)
-        run(["git", "commit", "-m", f"release {tag}"], check=False)
-        run(["git", "tag", tag], check=False)
+        run(["git", "add", "pyproject.toml"])
+        run(["git", "commit", "-m", f"chore: release {tag}"])
+        run(["git", "tag", tag])
         print(f"\nTagged: {tag}")
         push = args.push
         if not push and not args.yes:
             push = input("Push tag to remote? [y/N] ").strip().lower() == "y"
         if push:
-            run(["git", "push", "--follow-tags"], check=False)
+            run(["git", "push", "--follow-tags"])
 
     print(f"\nPublished Qubdi-SyncDB {new} to PyPI.")
 

@@ -226,25 +226,8 @@ class MySQLConnector(BaseConnector):
         if schema:
             self.execute_query(f"CREATE DATABASE IF NOT EXISTS {quote_identifier(schema, self.quote_char)}")
 
-    def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
-        definitions = [self._column_definition(column) for column in columns]
-        primary_keys = [quote_identifier(column.name, self.quote_char) for column in columns if column.is_primary_key]
-        if primary_keys:
-            definitions.append(f"PRIMARY KEY ({', '.join(primary_keys)})")
-        self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
-
-    def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}"
-        )
-
-    def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
-        )
-
-    def truncate_table(self, schema: str | None, table: str) -> None:
-        self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
+    # create_table, add_column, drop_column, and truncate_table are inherited
+    # from BaseConnector — MySQL uses the standard SQL shapes unchanged.
 
     def _connection_kwargs(self) -> dict[str, Any]:
         """Build a kwargs dict from the config, parsing a URL connection string if needed."""

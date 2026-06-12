@@ -51,17 +51,59 @@ class WatermarkUnitTests(unittest.TestCase):
         self.assertEqual(wm.max_watermark_value(10, [{"c": 3}], "c"), 10)
         self.assertEqual(wm.max_watermark_value(5, [{"c": None}], "c"), 5)
 
+    def test_max_watermark_value_mixed_types_raise_named_error(self):
+        # A bare TypeError from max() would not name the offending column.
+        with self.assertRaisesRegex(ValueError, "updated_at.*incomparable"):
+            wm.max_watermark_value(None, [{"updated_at": 1}, {"updated_at": "2026"}], "updated_at")
+        import datetime
+        with self.assertRaisesRegex(ValueError, "updated_at"):
+            wm.max_watermark_value("2026-01-01", [{"updated_at": datetime.datetime(2026, 1, 2)}], "updated_at")
+
     def test_read_watermark_file_missing_returns_empty(self):
         with TemporaryDirectory() as tmp:
             self.assertEqual(wm.read_watermark_file(Path(tmp) / "nope.json"), {})
 
-    def test_save_watermark_serialises_isoformat(self):
+    def test_save_watermark_round_trips_datetime_as_datetime(self):
         import datetime
         with TemporaryDirectory() as tmp:
             store = Path(tmp) / "wm.json"
             cfg = {"path": store, "key": "k", "column": "c", "value": None}
-            wm.save_watermark(cfg, datetime.datetime(2026, 6, 10, 12, 0, 0))
-            self.assertIn("2026-06-10T12:00:00", wm.read_watermark_file(store)["k"])
+            saved = datetime.datetime(2026, 6, 10, 12, 0, 0)
+            wm.save_watermark(cfg, saved)
+            spec = {
+                "source": "s", "destination": "d",
+                "incremental_column": "c", "watermark_store": str(store),
+                "watermark_key": "k",
+            }
+            # The next run must get a real datetime back, not an ISO string —
+            # string-vs-datetime filter params are driver-dependent.
+            self.assertEqual(wm.load_watermark(spec)["value"], saved)
+
+    def test_save_watermark_round_trips_date_and_decimal(self):
+        import datetime
+        from decimal import Decimal
+        with TemporaryDirectory() as tmp:
+            store = Path(tmp) / "wm.json"
+            wm.save_watermark({"path": store, "key": "d"}, datetime.date(2026, 6, 10))
+            wm.save_watermark({"path": store, "key": "n"}, Decimal("12.50"))
+            spec = {"source": "s", "destination": "d", "incremental_column": "c",
+                    "watermark_store": str(store)}
+            self.assertEqual(
+                wm.load_watermark({**spec, "watermark_key": "d"})["value"], datetime.date(2026, 6, 10)
+            )
+            self.assertEqual(
+                wm.load_watermark({**spec, "watermark_key": "n"})["value"], Decimal("12.50")
+            )
+
+    def test_legacy_plain_string_watermarks_pass_through(self):
+        import json
+        with TemporaryDirectory() as tmp:
+            store = Path(tmp) / "wm.json"
+            # Simulate a pre-2.x store holding a bare ISO string.
+            store.write_text(json.dumps({"k": "2026-01-01T00:00:00"}), encoding="utf-8")
+            spec = {"source": "s", "destination": "d", "incremental_column": "c",
+                    "watermark_store": str(store), "watermark_key": "k"}
+            self.assertEqual(wm.load_watermark(spec)["value"], "2026-01-01T00:00:00")
 
 
 if __name__ == "__main__":

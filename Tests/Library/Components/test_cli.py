@@ -28,7 +28,14 @@ class CliRunTests(unittest.TestCase):
         with mock.patch.object(cli.SyncDB, "run_config_file", return_value=fake_results) as run:
             code = cli.main(["run", "job.json"])
         self.assertEqual(code, 0)
-        run.assert_called_once_with("job.json")
+        # dry_run=None means "respect the job file's own settings.dry_run".
+        run.assert_called_once_with("job.json", dry_run=None)
+
+    def test_run_dry_run_flag_forces_dry_run(self):
+        with mock.patch.object(cli.SyncDB, "run_config_file", return_value=[]) as run:
+            code = cli.main(["run", "job.json", "--dry-run"])
+        self.assertEqual(code, 0)
+        run.assert_called_once_with("job.json", dry_run=True)
 
     def test_run_missing_file_returns_two(self):
         with mock.patch.object(cli.SyncDB, "run_config_file", side_effect=FileNotFoundError()):
@@ -62,6 +69,15 @@ class CliRunTests(unittest.TestCase):
             }
             config_path = Path(tmp) / "job.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            # A --dry-run pass first: it must report success without creating
+            # the target table or writing any rows.
+            code = cli.main(["run", str(config_path), "--dry-run"])
+            self.assertEqual(code, 0)
+            con = sqlite3.connect(dst_db)
+            tables = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            con.close()
+            self.assertEqual(tables, [], "--dry-run must not create the target table")
 
             code = cli.main(["run", str(config_path)])
             self.assertEqual(code, 0)

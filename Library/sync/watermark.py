@@ -38,13 +38,16 @@ numeric watermarks round-trip as numbers, not strings.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +73,52 @@ _WATERMARK_COLUMNS = [
 # acquire region locks on separate handles; this mutex closes that gap.
 _PROCESS_LOCK = threading.Lock()
 
+# Upper bound on waiting for the watermark file lock.  Generous — the lock is
+# held only for one JSON read-modify-write — but it prevents a hung process or
+# a persistent I/O error from spinning the Windows retry loop forever.
+_LOCK_TIMEOUT_SECONDS = 600.0
+
+
+def _encode_watermark(value: Any) -> Any:
+    """Encode a watermark value for JSON storage, preserving its Python type.
+
+    datetime/date/Decimal are wrapped in a small tagged dict so the next run
+    can bind the watermark filter parameter as its native type instead of a
+    string — string-vs-datetime comparison is driver-dependent and the reason
+    plain isoformat persistence was retired.  Other types pass through
+    unchanged (json.dump handles them or fails loudly).
+    """
+    if isinstance(value, datetime):
+        return {"__syncdb_wm__": "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        return {"__syncdb_wm__": "date", "value": value.isoformat()}
+    if isinstance(value, Decimal):
+        return {"__syncdb_wm__": "decimal", "value": str(value)}
+    if hasattr(value, "isoformat"):
+        # time-of-day and other isoformat-able exotics: legacy string behavior.
+        return value.isoformat()
+    return value
+
+
+def _decode_watermark(raw: Any) -> Any:
+    """Decode a stored watermark back to its native Python type.
+
+    Plain values (including pre-2.x stores that hold bare ISO strings) pass
+    through unchanged for backward compatibility.
+    """
+    if isinstance(raw, dict) and "__syncdb_wm__" in raw:
+        kind = raw.get("__syncdb_wm__")
+        value = raw.get("value")
+        if isinstance(value, str):
+            if kind == "datetime":
+                return datetime.fromisoformat(value)
+            if kind == "date":
+                return date.fromisoformat(value)
+            if kind == "decimal":
+                return Decimal(value)
+        return value
+    return raw
+
 
 @contextlib.contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
@@ -89,13 +138,24 @@ def _file_lock(path: Path) -> Iterator[None]:
             import msvcrt
 
             handle.seek(0)
-            # LK_LOCK retries for ~10s then raises; loop for indefinite blocking.
+            # LK_LOCK retries for ~10s then raises; loop to extend the wait —
+            # but only for "lock held" errnos and only up to a deadline, so a
+            # real I/O failure (bad handle, removed directory) or a hung lock
+            # holder surfaces as an error instead of an infinite spin.
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
             while True:
                 try:
                     msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                     break
-                except OSError:
-                    continue
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EDEADLK):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Could not acquire watermark lock {lock_path} within "
+                            f"{_LOCK_TIMEOUT_SECONDS:.0f}s; another process may be "
+                            "hung while holding it"
+                        ) from exc
             try:
                 yield
             finally:
@@ -178,7 +238,7 @@ def load_watermark(spec: dict[str, Any], target: BaseConnector | None = None) ->
         "path": path,
         "key": key,
         "column": column,
-        "value": values.get(key),
+        "value": _decode_watermark(values.get(key)),
         "comparison": comparison,
     }
 
@@ -199,9 +259,10 @@ def _read_database_watermark(target: BaseConnector, key: str) -> Any:
     raw = next(iter(rows[0].values()))
     if raw is None:
         return None
-    # Values are JSON-encoded on save so numbers round-trip as numbers.
+    # Values are JSON-encoded on save so numbers round-trip as numbers, and
+    # datetime/date/Decimal round-trip via the tagged-dict envelope.
     try:
-        return json.loads(raw)
+        return _decode_watermark(json.loads(raw))
     except (TypeError, ValueError):
         return raw
 
@@ -243,7 +304,7 @@ def save_watermark(config: dict[str, Any], value: Any, target: BaseConnector | N
     exclusive cross-process lock (see _file_lock) so concurrent writers to the
     same store cannot drop each other's keys.
     """
-    serialised = value.isoformat() if hasattr(value, "isoformat") else value
+    serialised = _encode_watermark(value)
     if config.get("storage") == "database":
         if target is None:
             raise ValueError("watermark_storage='database' requires a target connector")
@@ -293,11 +354,24 @@ def apply_watermark_filter(
 
 
 def max_watermark_value(current: Any, rows: list[dict[str, Any]], column: str) -> Any:
-    """Track the maximum non-null watermark value seen across fetched batches."""
+    """Track the maximum non-null watermark value seen across fetched batches.
+
+    Raises a descriptive ValueError when the column yields values of
+    incomparable types (e.g. str in one batch, datetime in another) — a bare
+    TypeError from max() mid-sync would not name the offending column.
+    """
     values: list[Any] = [row.get(column) for row in rows if row.get(column) is not None]
     if not values:
         return current
-    batch_max: Any = max(values)
-    if current is None or batch_max > current:
-        return batch_max
+    try:
+        batch_max: Any = max(values)
+        if current is None or batch_max > current:
+            return batch_max
+    except TypeError as exc:
+        seen = [*values, *([current] if current is not None else [])]
+        types = ", ".join(sorted({type(v).__name__ for v in seen}))
+        raise ValueError(
+            f"Watermark column '{column}' produced values of incomparable types "
+            f"({types}); an incremental cursor cannot be tracked over mixed types"
+        ) from exc
     return current

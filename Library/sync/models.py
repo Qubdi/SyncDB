@@ -14,6 +14,11 @@ class TransferMode(str, Enum):
     APPEND = "append"
     # Pure append: insert every source row as-is and never delete/update existing
     # target rows.  Useful for immutable event streams, audit logs, and history tables.
+    # CAUTION with retry_count > 0: there is no primary key to make a retry
+    # idempotent, so a batch whose failure lands AFTER the database committed
+    # (e.g. a commit acknowledgement lost to a network drop) is re-inserted in
+    # full on retry, duplicating those rows.  Prefer APPEND or UPSERT with a
+    # primary key when retries are enabled and duplicates are unacceptable.
     INSERT_ONLY = "insert_only"
     # Explicit upsert mode using each engine's native atomic statement:
     # PostgreSQL INSERT ... ON CONFLICT DO UPDATE, MSSQL MERGE, MySQL
@@ -23,6 +28,8 @@ class TransferMode(str, Enum):
     # inserts — two separate statements, not a single atomic upsert.)
     UPSERT = "upsert"
     # Append every source row with a _synced_at timestamp for historical snapshots.
+    # Same retry caveat as INSERT_ONLY: a retried batch whose original attempt
+    # actually committed is inserted twice (PKs are stripped in this mode).
     SNAPSHOT = "snapshot"
     # Upsert active source rows, then mark target rows missing from the source with deleted_at.
     SOFT_DELETE = "soft_delete"

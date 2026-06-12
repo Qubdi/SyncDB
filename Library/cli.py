@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Run a table-sync job from a JSON or YAML config file.")
     run.add_argument("config", help="Path to a .json, .yaml, or .yml job config file.")
+    run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan and report schema changes without writing any data or DDL.",
+    )
 
     return parser
 
@@ -51,7 +56,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "run":
         try:
-            results = SyncDB.run_config_file(args.config)
+            # --dry-run forces a preview; without the flag the job file's own
+            # settings.dry_run (if any) stays in effect.
+            results = SyncDB.run_config_file(args.config, dry_run=True if args.dry_run else None)
         except FileNotFoundError:
             print(f"error: config file not found: {args.config}", file=sys.stderr)
             return 2
@@ -59,7 +66,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
         total = sum(r.rows_written for r in results)
-        print(f"Synced {len(results)} table(s); {total:,} rows written.")
+        if args.dry_run:
+            print(f"Dry run: planned {len(results)} table(s); no data written.")
+        else:
+            print(f"Synced {len(results)} table(s); {total:,} rows written.")
         return 0
 
     parser.error(f"unknown command: {args.command}")

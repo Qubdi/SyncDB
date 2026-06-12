@@ -40,8 +40,10 @@ mypy Library/
 # Measure coverage against the 90% gate (currently ~93%)
 pytest Tests/Library/Components --cov=Library
 
-# Install local quality hooks (ruff on commit; mypy + component tests on push)
+# Install local quality hooks (ruff + commit-message format on commit;
+# mypy + component tests on push) — installs all hook types automatically
 pre-commit install
+
 ```
 
 ## Architecture

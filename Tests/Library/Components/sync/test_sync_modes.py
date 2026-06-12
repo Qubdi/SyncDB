@@ -1,4 +1,5 @@
 import unittest
+import warnings
 
 from syncdb import Column
 
@@ -6,6 +7,27 @@ from .helpers import MemoryConnector, make_sync
 
 
 class SyncModesTests(unittest.TestCase):
+    def test_soft_delete_without_primary_key_warns_and_skips_deletion(self):
+        # Without a PK the seen-keys pass cannot run; that must be loud, not silent.
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "logs"): [{"msg": "a"}]},
+            columns_by_table={("dbo", "logs"): [Column("msg", "nvarchar", char_length=50)]},
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = make_sync(source, target)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = sync.sync_tables(
+                {"logs": {"source": "dbo.logs", "destination": "public.logs", "mode": "soft_delete"}}
+            )[0]
+
+        self.assertEqual(result.rows_soft_deleted, 0)
+        messages = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+        self.assertTrue(any("SOFT_DELETE needs a primary key" in m for m in messages))
+
     def test_append_creates_schema_table_and_batches_rows(self):
         source = MemoryConnector(
             "mssql",

@@ -8,11 +8,17 @@ progress bars and per-sync summaries from tests that use shared make_sync helper
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from collections import Counter
 
 import pytest
+
+# Set by pytest_configure when live output is enabled; the logstart/logreport
+# hooks receive no config argument, so they read it from here (previously it
+# was stashed on the hook functions themselves, which is harder to follow).
+_LIVE_CONFIG = None
 
 
 def pytest_addoption(parser) -> None:
@@ -44,6 +50,9 @@ def _detail_enabled(config) -> bool:
 def pytest_configure(config) -> None:
     if not _live_enabled(config):
         return
+
+    global _LIVE_CONFIG
+    _LIVE_CONFIG = config
 
     # Keep pytest's own per-test node IDs quiet; this plugin prints a cleaner
     # workflow/scenario/test block instead.
@@ -77,7 +86,7 @@ def pytest_report_header(config) -> str | None:
 
 
 def pytest_runtest_logstart(nodeid: str, location) -> None:
-    config = getattr(pytest_runtest_logstart, "_config", None)
+    config = _LIVE_CONFIG
     if config is None or not _live_enabled(config):
         return
     details = _describe_nodeid(nodeid)
@@ -92,7 +101,7 @@ def pytest_runtest_logstart(nodeid: str, location) -> None:
 
 
 def pytest_runtest_logreport(report) -> None:
-    config = getattr(pytest_runtest_logreport, "_config", None)
+    config = _LIVE_CONFIG
     if config is None or not _live_enabled(config):
         return
 
@@ -165,9 +174,15 @@ def pytest_runtest_call(item):
     if _live_enabled(config):
         capture_manager = config.pluginmanager.getplugin("capturemanager")
         if capture_manager is not None:
-            capture_manager.stop_global_capturing()
-            capture_manager._method = "no"
-            capture_manager.start_global_capturing()
+            # _method is a private pytest attribute; if a pytest upgrade
+            # removes it, degrade to captured (less pretty) output rather
+            # than crashing the whole test session.
+            try:
+                capture_manager.stop_global_capturing()
+                capture_manager._method = "no"
+                capture_manager.start_global_capturing()
+            except AttributeError:
+                capture_manager = None
     outcome = yield
     if capture_manager is not None:
         capture_manager.suspend_global_capture(in_=True)
@@ -177,11 +192,11 @@ def pytest_runtest_call(item):
 def pytest_sessionstart(session) -> None:
     config = session.config
     if _live_enabled(config):
-        pytest_runtest_logstart._config = config
-        pytest_runtest_logreport._config = config
         terminal_reporter = config.pluginmanager.getplugin("terminalreporter")
         if terminal_reporter is not None:
-            terminal_reporter._showfspath = False
+            # Private pytest attribute; cosmetic only, so tolerate its removal.
+            with contextlib.suppress(AttributeError):
+                terminal_reporter._showfspath = False
         capture_manager = config.pluginmanager.getplugin("capturemanager")
         if capture_manager is not None:
             capture_manager.suspend_global_capture(in_=True)

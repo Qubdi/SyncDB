@@ -87,12 +87,18 @@ version control.
 
 ## Performance notes
 
+- **PostgreSQL bulk loads:** enable `COPY FROM STDIN` — the fastest Postgres
+  ingest path, typically several times faster than the default multi-row
+  INSERT — with `DatabaseConfig(..., options={"use_copy": True})`.
 - **MSSQL bulk loads:** pyodbc's `fast_executemany` is off by default because it
   can mis-size string buffers for mixed-length varchar batches.  For homogeneous
   bulk loads it is typically 10–100× faster — enable it per endpoint with
   `DatabaseConfig(..., options={"fast_executemany": True})`.
 - **PostgreSQL / MySQL reads stream server-side** (named cursors / `SSCursor`),
   so memory use is bounded by `batch_size` regardless of table size.
+- **Huge source tables:** set `"count_source_rows": False` in the table spec to
+  skip the pre-sync `SELECT COUNT(*)` when it is more expensive than a
+  percentage-accurate progress bar.
 
 ---
 

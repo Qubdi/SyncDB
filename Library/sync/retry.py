@@ -25,6 +25,13 @@ def with_retries(
 
     on_retry is called after the sleep and before re-invoking operation; use it
     to reconnect a database connection that may have dropped during the failure.
+
+    IMPORTANT — at-least-once semantics: operation is re-run in full.  If the
+    failure occurred AFTER the database durably committed (e.g. a lost commit
+    acknowledgement), a non-idempotent operation is applied twice.  Batch
+    writes with a primary key (APPEND delete+insert, UPSERT) tolerate this;
+    INSERT_ONLY and SNAPSHOT writes do not and can duplicate rows — see the
+    TransferMode docstrings.
     """
     attempt = 0
     while True:

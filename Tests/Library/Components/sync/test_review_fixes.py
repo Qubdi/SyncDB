@@ -233,6 +233,7 @@ class ParallelSyncErrorTests(unittest.TestCase):
 class KeysTableDeleteTests(unittest.TestCase):
     def test_large_delete_uses_keys_table_and_removes_rows(self):
         connector = _sqlite()
+        self.addCleanup(connector.close)
         connector.create_table(None, "t", [Column("id", "integer", nullable=False, is_primary_key=True)])
         all_rows = [{"id": i} for i in range(1500)]
         connector.insert_batch(None, "t", all_rows, ["id"])
@@ -248,6 +249,7 @@ class KeysTableDeleteTests(unittest.TestCase):
 
     def test_execute_update_returns_rowcount(self):
         connector = _sqlite()
+        self.addCleanup(connector.close)
         connector.create_table(None, "t", [Column("id", "integer", nullable=False, is_primary_key=True)])
         connector.insert_batch(None, "t", [{"id": 1}, {"id": 2}], ["id"])
         affected = connector.execute_update('DELETE FROM "t" WHERE id > ?', [0])

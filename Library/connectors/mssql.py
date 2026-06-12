@@ -27,6 +27,8 @@ class MSSQLConnector(BaseConnector):
     placeholder = "?"
     # System timestamp columns (_synced_at, deleted_at) use datetime2.
     timestamp_type = "datetime2"
+    # T-SQL rejects the optional COLUMN keyword in ALTER TABLE ... ADD.
+    _add_column_keyword = "ADD"
 
     @staticmethod
     def _odbc_escape(value: str) -> str:
@@ -242,20 +244,5 @@ class MSSQLConnector(BaseConnector):
         quoted = f"[{schema}]"
         self.execute_query(f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC sp_executesql N'CREATE SCHEMA {quoted}'")
 
-    def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
-        definitions = [self._column_definition(column) for column in columns]
-        primary_keys = [quote_identifier(column.name, self.quote_char) for column in columns if column.is_primary_key]
-        if primary_keys:
-            definitions.append(f"PRIMARY KEY ({', '.join(primary_keys)})")
-        self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
-
-    def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        self.execute_query(f"ALTER TABLE {self.quote_table(schema, table)} ADD {self._column_definition(column)}")
-
-    def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
-        )
-
-    def truncate_table(self, schema: str | None, table: str) -> None:
-        self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
+    # create_table, add_column, drop_column, and truncate_table are inherited
+    # from BaseConnector; only _add_column_keyword differs for MSSQL.

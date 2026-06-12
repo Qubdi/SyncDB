@@ -1,4 +1,6 @@
+import sys
 import unittest
+from unittest import mock
 
 from syncdb import Column, DatabaseConfig
 from syncdb.connectors import MSSQLConnector
@@ -174,6 +176,41 @@ class MSSQLConnectorTests(unittest.TestCase):
             [("information_schema.tables", ["TABLE_NAME"], [("orders",), ("customers",)])]
         )
         self.assertEqual(connector.list_tables("dbo"), ["orders", "customers"])
+
+
+class MSSQLConnectTests(unittest.TestCase):
+    """connect() builds an injection-safe ODBC string; exercised with a mocked pyodbc."""
+
+    def test_connect_escapes_credentials_in_connection_string(self):
+        fake_pyodbc = mock.MagicMock()
+        fake_pyodbc.connect.return_value = FakeConnection()
+        config = DatabaseConfig(
+            engine="mssql", host="srv", database="db", user="u", password="p;w}d"
+        )
+        connector = MSSQLConnector(config)
+        with mock.patch.dict(sys.modules, {"pyodbc": fake_pyodbc}):
+            connector.connect()
+        conn_str = fake_pyodbc.connect.call_args.args[0]
+        # The ';' in the password must be braced and the '}' doubled, so it
+        # cannot terminate the PWD attribute and inject new ODBC attributes.
+        self.assertIn("PWD={p;w}}d};", conn_str)
+        # "srv,1433" contains no ODBC-special characters, so it stays unbraced.
+        self.assertIn("Server=srv,1433;", conn_str)
+        self.assertIn("Driver={ODBC Driver 18 for SQL Server};", conn_str)
+        self.assertIn("LoginTimeout=30;", conn_str)
+
+    def test_connect_uses_raw_connection_string_with_timeout(self):
+        fake_pyodbc = mock.MagicMock()
+        fake_pyodbc.connect.return_value = FakeConnection()
+        config = DatabaseConfig(
+            engine="mssql", connection_string="DSN=warehouse", query_timeout=15
+        )
+        connector = MSSQLConnector(config)
+        with mock.patch.dict(sys.modules, {"pyodbc": fake_pyodbc}):
+            connector.connect()
+        args, kwargs = fake_pyodbc.connect.call_args
+        self.assertEqual(args[0], "DSN=warehouse")
+        self.assertEqual(kwargs["timeout"], 15)
 
 
 if __name__ == "__main__":

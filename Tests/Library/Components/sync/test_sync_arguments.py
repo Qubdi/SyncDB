@@ -59,6 +59,57 @@ class SyncArgumentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must include source and destination"):
             sync.sync_tables({"bad": {"source": "dbo.items"}})
 
+    def test_unknown_spec_key_warns_instead_of_failing_silently(self):
+        # A typo like "incremental_colum" would otherwise silently disable the
+        # watermark and re-sync the full table; it must at least warn loudly.
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "items"): [{"id": 1}]},
+            columns_by_table={("dbo", "items"): [Column("id", "int")]},
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = make_sync(source, target)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            sync.sync_tables(
+                {
+                    "items": {
+                        "source": "dbo.items",
+                        "destination": "public.items",
+                        "incremental_colum": "updated_at",  # deliberate typo
+                    }
+                }
+            )
+        messages = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+        self.assertTrue(any("incremental_colum" in m and "unknown key" in m for m in messages))
+
+    def test_known_spec_keys_do_not_warn(self):
+        source = MemoryConnector(
+            "mssql",
+            "dbo",
+            rows_by_table={("dbo", "items"): [{"id": 1}]},
+            columns_by_table={("dbo", "items"): [Column("id", "int", is_primary_key=True)]},
+        )
+        target = MemoryConnector("postgresql", "public")
+        sync = make_sync(source, target)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            sync.sync_tables(
+                {
+                    "items": {
+                        "source": "dbo.items",
+                        "destination": "public.items",
+                        "mode": "upsert",
+                        "primary_key": ["id"],
+                        "count_source_rows": False,
+                    }
+                }
+            )
+        self.assertFalse([w for w in caught if "unknown key" in str(w.message)])
+
     def test_constructor_closes_connections_after_successful_sync(self):
         source = MemoryConnector(
             "mssql",

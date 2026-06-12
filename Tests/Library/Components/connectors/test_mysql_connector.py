@@ -1,4 +1,6 @@
+import sys
 import unittest
+from unittest import mock
 
 from syncdb import Column, DatabaseConfig
 from syncdb.connectors import MySQLConnector
@@ -146,6 +148,66 @@ class MySQLConnectorTests(unittest.TestCase):
     def test_upsert_batch_empty_is_noop(self):
         connector = make_connector()
         self.assertEqual(connector.upsert_batch(None, "t", [], ["id"], ["id"]), 0)
+
+
+class MySQLConnectTests(unittest.TestCase):
+    """Driver-selection logic in connect(), exercised with mocked driver modules."""
+
+    def _config(self) -> DatabaseConfig:
+        return DatabaseConfig(engine="mysql", host="h", database="db", user="u", password="p")
+
+    def test_connect_prefers_mysql_connector_and_renames_timeout_kwarg(self):
+        fake_pkg = mock.MagicMock()
+        fake_driver = mock.MagicMock()
+        # `import mysql.connector as x` binds getattr(mysql, "connector"), so the
+        # parent package must expose the same object registered in sys.modules.
+        fake_pkg.connector = fake_driver
+        fake_driver.connect.return_value = FakeConnection()
+        connector = MySQLConnector(self._config())
+        with mock.patch.dict(sys.modules, {"mysql": fake_pkg, "mysql.connector": fake_driver}):
+            connector.connect()
+        kwargs = fake_driver.connect.call_args.kwargs
+        # mysql-connector-python takes connection_timeout, not connect_timeout.
+        self.assertEqual(kwargs["connection_timeout"], 30)
+        self.assertNotIn("connect_timeout", kwargs)
+        self.assertEqual(kwargs["host"], "h")
+
+    def test_connect_falls_back_to_pymysql_with_connect_timeout(self):
+        fake_pymysql = mock.MagicMock()
+        fake_conn = FakeConnection()
+        fake_pymysql.connect.return_value = fake_conn
+        connector = MySQLConnector(self._config())
+        # sys.modules[name] = None makes `import name` raise ImportError,
+        # forcing connect() down the pymysql fallback branch.
+        with mock.patch.dict(
+            sys.modules, {"mysql": None, "mysql.connector": None, "pymysql": fake_pymysql}
+        ):
+            connector.connect()
+        self.assertIs(connector.connection, fake_conn)
+        kwargs = fake_pymysql.connect.call_args.kwargs
+        self.assertEqual(kwargs["connect_timeout"], 30)
+
+    def test_connect_raises_clear_error_when_no_driver_installed(self):
+        connector = MySQLConnector(self._config())
+        with (
+            mock.patch.dict(sys.modules, {"mysql": None, "mysql.connector": None, "pymysql": None}),
+            self.assertRaisesRegex(ImportError, "mysql-connector-python or pymysql"),
+        ):
+            connector.connect()
+
+    def test_connect_applies_query_timeout_after_driver_selection(self):
+        fake_pkg = mock.MagicMock()
+        fake_driver = mock.MagicMock()
+        fake_pkg.connector = fake_driver
+        fake_conn = FakeConnection()
+        fake_driver.connect.return_value = fake_conn
+        config = DatabaseConfig(
+            engine="mysql", host="h", database="db", user="u", password="p", query_timeout=7
+        )
+        connector = MySQLConnector(config)
+        with mock.patch.dict(sys.modules, {"mysql": fake_pkg, "mysql.connector": fake_driver}):
+            connector.connect()
+        self.assertIn("SET SESSION max_execution_time = 7000", fake_conn.last_query())
 
 
 if __name__ == "__main__":

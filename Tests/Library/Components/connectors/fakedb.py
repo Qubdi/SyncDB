@@ -47,6 +47,13 @@ class FakeCursor:
         self.description = None
         self._rows = []
 
+    def copy_expert(self, sql: str, file: Any) -> None:
+        # psycopg2 COPY support: record the statement and the full payload the
+        # connector streamed, so tests can assert the exact CSV it generated.
+        self._conn.executed.append((sql, file.read()))
+        self.description = None
+        self._rows = []
+
     def fetchall(self) -> list[tuple[Any, ...]]:
         rows, self._rows = self._rows, []
         return rows

@@ -1,6 +1,14 @@
 # Local quality gates — install once with:  pip install pre-commit && pre-commit install
 # Mirrors the manual commands in CLAUDE.md (ruff check/format Library/, mypy Library/)
 # so nothing correctness-sensitive lands in a commit unchecked.
+
+# Install every hook type this config uses in one `pre-commit install` —
+# without this, the pre-push and commit-msg hooks silently never run.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+# Hooks without an explicit `stages:` run only at commit time; the commit-msg
+# and pre-push hooks below opt in to their stages explicitly.
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.9
@@ -12,6 +20,14 @@ repos:
 
   - repo: local
     hooks:
+      # Conventional Commits subject check — "update" commits defeat git
+      # bisect/blame on a published package; see Tools/check_commit_message.py.
+      - id: commit-message-format
+        name: commit message format (Conventional Commits)
+        entry: python Tools/check_commit_message.py
+        language: system
+        stages: [commit-msg]
+
       - id: mypy-library
         name: mypy --strict on Library/
         entry: python -m mypy Library/

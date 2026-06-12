@@ -11,6 +11,8 @@ other engines are not forced to emulate it.
 
 from __future__ import annotations
 
+import io
+import json
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -105,11 +107,18 @@ class PostgresConnector(BaseConnector):
         execute_values sends the entire batch in a single multi-row INSERT statement
         (one network round-trip) rather than one statement per row, which is
         dramatically faster for large batches than executemany().
+
+        DatabaseConfig(options={"use_copy": True}) switches to COPY ... FROM
+        STDIN — PostgreSQL's fastest ingest path, typically several times
+        faster again for large batches.  Opt-in because COPY bypasses
+        psycopg2's type adapters; see _copy_batch for the types it covers.
         """
         records = list(rows)
         if not records:
             return 0
         self.connect()
+        if self.config.options.get("use_copy"):
+            return self._copy_batch(schema, table, records, columns)
         from psycopg2.extras import execute_values
 
         column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
@@ -128,6 +137,63 @@ class PostgresConnector(BaseConnector):
         finally:
             cursor.close()
         return len(records)
+
+    def _copy_batch(
+        self,
+        schema: str | None,
+        table: str,
+        records: list[dict[str, Any]],
+        columns: Sequence[str],
+    ) -> int:
+        """Bulk-load one batch via COPY ... FROM STDIN (FORMAT csv).
+
+        Values are rendered to CSV text by _copy_field, which covers the types
+        this library moves (None, bool, numbers, str, datetime/date, Decimal,
+        UUID, bytes as bytea hex, dict/list as JSON) but NOT custom psycopg2
+        adapter registrations — which is why COPY is opt-in rather than the
+        default insert path.
+        """
+        buffer = io.StringIO()
+        for row in records:
+            buffer.write(",".join(self._copy_field(row.get(col)) for col in columns))
+            buffer.write("\n")
+        buffer.seek(0)
+        column_sql = ", ".join(quote_identifier(col, self.quote_char) for col in columns)
+        copy_sql = f"COPY {self.quote_table(schema, table)} ({column_sql}) FROM STDIN WITH (FORMAT csv, NULL '\\N')"
+        cursor = self.connection.cursor()
+        try:
+            cursor.copy_expert(copy_sql, buffer)
+            if not self._in_transaction:
+                self.connection.commit()
+        finally:
+            cursor.close()
+        return len(records)
+
+    @staticmethod
+    def _copy_field(value: Any) -> str:
+        """Render one value as a CSV field for COPY.
+
+        Every non-NULL textual value is quoted (with "" doubling) so data can
+        never forge the unquoted \\N NULL marker and empty strings stay
+        distinct from NULL — quoted fields are never treated as NULL by
+        PostgreSQL's CSV reader.
+        """
+        if value is None:
+            return "\\N"
+        if isinstance(value, bool):
+            # bool is a subclass of int; it must be checked first.
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value)
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            # bytea hex input format.
+            text = "\\x" + bytes(value).hex()
+        else:
+            # str, datetime/date/time, Decimal, UUID — all parse from text.
+            text = str(value)
+        return '"' + text.replace('"', '""') + '"'
 
     def upsert_batch(
         self,
@@ -236,22 +302,5 @@ class PostgresConnector(BaseConnector):
         if schema:
             self.execute_query(f"CREATE SCHEMA IF NOT EXISTS {quote_identifier(schema, self.quote_char)}")
 
-    def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
-        definitions = [self._column_definition(column) for column in columns]
-        primary_keys = [quote_identifier(column.name, self.quote_char) for column in columns if column.is_primary_key]
-        if primary_keys:
-            definitions.append(f"PRIMARY KEY ({', '.join(primary_keys)})")
-        self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
-
-    def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}"
-        )
-
-    def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
-        )
-
-    def truncate_table(self, schema: str | None, table: str) -> None:
-        self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
+    # create_table, add_column, drop_column, and truncate_table are inherited
+    # from BaseConnector — PostgreSQL uses the standard SQL shapes unchanged.

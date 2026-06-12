@@ -145,22 +145,8 @@ class SQLiteConnector(BaseConnector):
         """No-op: SQLite does not support server-side schemas."""
         return
 
-    def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
-        definitions = [self._column_definition(column) for column in columns]
-        primary_keys = [quote_identifier(column.name, self.quote_char) for column in columns if column.is_primary_key]
-        if primary_keys:
-            definitions.append(f"PRIMARY KEY ({', '.join(primary_keys)})")
-        self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
-
-    def add_column(self, schema: str | None, table: str, column: Column) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} ADD COLUMN {self._column_definition(column)}"
-        )
-
-    def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
-        self.execute_query(
-            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
-        )
+    # create_table, add_column, and drop_column are inherited from BaseConnector;
+    # SQLite accepts the standard SQL shapes unchanged.
 
     def truncate_table(self, schema: str | None, table: str) -> None:
         # SQLite has no TRUNCATE statement; DELETE FROM achieves the same effect.

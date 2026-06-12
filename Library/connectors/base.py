@@ -55,9 +55,11 @@ class BaseConnector(ABC):
     2. Implement all @abstractmethod methods.  The shared helpers (list_tables,
        get_row_count, delete_matching_rows, update_matching_rows, copy_table_rows,
        drop_table, upsert_batch, apply_soft_deletes_sql, fetch_batches,
-       execute_query_batches) use only `execute_query`, `_batch_cursor`, and
-       `quote_char`, so they are free for the subclass to inherit without override
-       unless the engine needs different SQL.
+       execute_query_batches, create_table, add_column, drop_column,
+       truncate_table) use only `execute_query`, `_batch_cursor`, `quote_char`,
+       and `_add_column_keyword`, so they are free for the subclass to inherit
+       without override unless the engine needs different SQL (MSSQL overrides
+       `_add_column_keyword`; SQLite overrides truncate_table).
     3. Make connect() idempotent: guard with `if self.connection is not None: return`.
     4. Lazy-import the driver inside connect() so users who don't need this engine
        don't pay the import cost or get ImportError at package load time.
@@ -310,21 +312,41 @@ class BaseConnector(ABC):
         A None schema is silently ignored.
         """
 
-    @abstractmethod
-    def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
-        """Create a table from a list of mapped Columns, including a PRIMARY KEY if any."""
+    # SQL keyword sequence used by ALTER TABLE to add a column.  Standard SQL
+    # is "ADD COLUMN"; MSSQL overrides to "ADD" (it rejects the COLUMN keyword).
+    _add_column_keyword = "ADD COLUMN"
 
-    @abstractmethod
+    def create_table(self, schema: str | None, table: str, columns: Sequence[Column]) -> None:
+        """Create a table from a list of mapped Columns, including a PRIMARY KEY if any.
+
+        The statement shape is identical across all supported engines; only
+        quote_char differs, so this lives here rather than in each connector.
+        """
+        definitions = [self._column_definition(column) for column in columns]
+        primary_keys = [quote_identifier(column.name, self.quote_char) for column in columns if column.is_primary_key]
+        if primary_keys:
+            definitions.append(f"PRIMARY KEY ({', '.join(primary_keys)})")
+        self.execute_query(f"CREATE TABLE {self.quote_table(schema, table)} ({', '.join(definitions)})")
+
     def add_column(self, schema: str | None, table: str, column: Column) -> None:
         """ALTER TABLE ADD COLUMN for a missing target column."""
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} "
+            f"{self._add_column_keyword} {self._column_definition(column)}"
+        )
 
-    @abstractmethod
     def drop_column(self, schema: str | None, table: str, column_name: str) -> None:
         """ALTER TABLE DROP COLUMN for an extra target column."""
+        self.execute_query(
+            f"ALTER TABLE {self.quote_table(schema, table)} DROP COLUMN {quote_identifier(column_name, self.quote_char)}"
+        )
 
-    @abstractmethod
     def truncate_table(self, schema: str | None, table: str) -> None:
-        """Remove all rows from a table without logging individual deletes."""
+        """Remove all rows from a table without logging individual deletes.
+
+        SQLite overrides this (it has no TRUNCATE statement).
+        """
+        self.execute_query(f"TRUNCATE TABLE {self.quote_table(schema, table)}")
 
     def list_tables(self, schema: str | None = None) -> list[str]:
         """Return base-table names in a schema for schema-level sync."""
@@ -610,13 +632,19 @@ class BaseConnector(ABC):
         target_table: str,
         columns: Sequence[str],
     ) -> int:
-        """Copy all rows from one table to another table in the same database."""
+        """Copy all rows from one table to another table in the same database.
+
+        Returns the INSERT's own affected-row count, which stays truthful even
+        when the source table changes concurrently.  Drivers that cannot report
+        a count (rowcount of -1, normalised to 0 by execute_update) fall back
+        to counting the source table — the pre-2.x behavior.
+        """
         column_sql = ", ".join(quote_identifier(column, self.quote_char) for column in columns)
-        self.execute_query(
+        affected = self.execute_update(
             f"INSERT INTO {self.quote_table(target_schema, target_table)} ({column_sql}) "
             f"SELECT {column_sql} FROM {self.quote_table(source_schema, source_table)}"
         )
-        return self.get_row_count(source_schema, source_table)
+        return affected if affected > 0 else self.get_row_count(source_schema, source_table)
 
     def drop_table(self, schema: str | None, table: str) -> None:
         """Drop a table if it exists."""

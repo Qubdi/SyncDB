@@ -72,6 +72,34 @@ _ALLOWED_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
+# Every key a table spec may carry.  Unknown keys are warned about in
+# _plan_table_sync because a typo here fails silently otherwise — e.g.
+# "incremental_colum" would quietly disable the watermark and re-sync the
+# full table instead of raising or filtering.
+_ALLOWED_SPEC_KEYS: frozenset[str] = frozenset(
+    {
+        "source",
+        "destination",
+        "mode",
+        "filter",
+        "order_by",
+        "primary_key",
+        "batch_size",
+        "rename",
+        "type_overrides",
+        "transform",
+        "on_batch",
+        "use_transaction",
+        "expect",
+        "count_source_rows",
+        "incremental_column",
+        "watermark_comparison",
+        "watermark_storage",
+        "watermark_store",
+        "watermark_key",
+    }
+)
+
 
 @dataclasses.dataclass
 class _TableSyncPlan:
@@ -381,11 +409,18 @@ class SyncDB:
         return DatabaseConfig(**{k: raw[k] for k in raw if k in _CONFIG_FIELDS})
 
     @classmethod
-    def run_config_file(cls, path: str | Path) -> list[TableSyncResult]:
-        """Load a YAML/JSON config file and run its table sync job."""
+    def run_config_file(cls, path: str | Path, dry_run: bool | None = None) -> list[TableSyncResult]:
+        """Load a YAML/JSON config file and run its table sync job.
+
+        dry_run, when not None, overrides the settings.dry_run value from the
+        file — this backs the CLI --dry-run flag so a job can be previewed
+        without writing any data or DDL.
+        """
         config_path = Path(path)
         config = cls._load_job_config(config_path)
         sync = cls.from_job_config(config)
+        if dry_run is not None:
+            sync.dry_run = dry_run
         return sync.sync_tables(config.get("tables") or {})
 
     @staticmethod
@@ -576,6 +611,14 @@ class SyncDB:
         file.  No tables are created or written here, so a dry run can stop
         after this plus schema alignment.
         """
+        unknown_keys = set(spec) - _ALLOWED_SPEC_KEYS
+        if unknown_keys:
+            warnings.warn(
+                f"Table spec '{name}' contains unknown key(s) that will be ignored: "
+                f"{sorted(unknown_keys)}. Valid keys: {sorted(_ALLOWED_SPEC_KEYS)}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         mode = TransferMode(spec.get("mode", TransferMode.APPEND.value))
         use_tx = self.use_transaction or bool(spec.get("use_transaction", False))
         source_name = parse_qualified_name(spec["source"], source.config.default_schema)
@@ -607,6 +650,14 @@ class SyncDB:
         if mode == TransferMode.SOFT_DELETE and target_primary_key:
             pk_col_map = {col.name: col for col in target_columns}
             pk_cols_for_sd = [pk_col_map[pk] for pk in target_primary_key if pk in pk_col_map]
+        if mode == TransferMode.SOFT_DELETE and not pk_cols_for_sd:
+            warnings.warn(
+                f"Table '{name}': SOFT_DELETE needs a primary key to detect rows "
+                "missing from the source; none was found or specified, so NO rows "
+                "will be marked deleted this run. Set 'primary_key' in the table spec.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         filter_sql, params = build_where_clause(spec.get("filter"))
         watermark_cfg = wm.load_watermark(spec, target)
@@ -985,19 +1036,24 @@ class SyncDB:
         mode: TransferMode,
         snapshot_ts: str | None,
     ) -> list[dict[str, Any]]:
-        rows = [dict(row) for row in raw_batch]
+        rows: Sequence[dict[str, Any]] = raw_batch
         if transform:
-            transformed = transform(rows)
-            if transformed is not None:
-                rows = [dict(row) for row in transformed]
+            # Transforms may mutate rows in place, so hand them defensive copies.
+            copies = [dict(row) for row in raw_batch]
+            transformed = transform(copies)
+            rows = copies if transformed is None else [dict(row) for row in transformed]
+        # Single dict build per row: each target column looks up its source key
+        # directly (rename map inverted) instead of materialising an intermediate
+        # renamed dict — one allocation per row instead of three.
+        source_key = {target: source for source, target in rename_map.items()}
         prepared: list[dict[str, Any]] = []
         for row in rows:
-            mapped = {rename_map.get(col, col): value for col, value in row.items()}
+            out = {col: row.get(source_key.get(col, col)) for col in target_columns}
             if mode == TransferMode.SNAPSHOT:
-                mapped["_synced_at"] = snapshot_ts
+                out["_synced_at"] = snapshot_ts
             if mode == TransferMode.SOFT_DELETE:
-                mapped["deleted_at"] = None
-            prepared.append({col: mapped.get(col) for col in target_columns})
+                out["deleted_at"] = None
+            prepared.append(out)
         return prepared
 
     def _safe_source_count(

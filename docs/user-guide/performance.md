@@ -24,6 +24,30 @@ SyncDB(source=src, target=tgt, batch_size="5%")
 
 ---
 
+## Skip the source row count
+
+Before each table sync, SyncDB runs `SELECT COUNT(*)` on the source (with the table's filter applied) to size percentage batches and drive the progress bar.  On very large tables — especially MSSQL heaps — that count alone can take minutes.  Disable it per table when the cost outweighs a percentage-accurate progress bar:
+
+```python
+{"source": "...", "destination": "...", "count_source_rows": False}
+```
+
+Progress falls back to a plain running row count, and percentage `batch_size` values fall back to the default 5 000.
+
+---
+
+## PostgreSQL bulk load: COPY
+
+When the **target** is PostgreSQL, `options={"use_copy": True}` switches inserts from `execute_values` to `COPY ... FROM STDIN` — PostgreSQL's fastest ingest path, typically several times faster for large batches:
+
+```python
+DatabaseConfig(engine="postgresql", host="...", options={"use_copy": True})
+```
+
+COPY bypasses psycopg2's type adapters; SyncDB renders values to CSV itself, covering `None`, bool, numbers, strings, datetimes, `Decimal`, UUID, bytes (bytea), and dict/list (JSON).  Leave it off if you rely on custom psycopg2 adapter registrations.
+
+---
+
 ## SOFT_DELETE on large tables
 
 `SOFT_DELETE` mode previously loaded all target primary-key rows into Python memory to find rows missing from the source.  As of v2.0, SyncDB creates a temporary key table in the target database and uses a single SQL `NOT EXISTS` subquery — no Python-side target scan.
